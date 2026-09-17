@@ -1,0 +1,55 @@
+# ===== Secrets (NEVER COMMIT THESE) =====
+.env
+.env.local
+.env.*.local
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ===== Virtual Environments =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Conda =====
+.conda/
+*.conda
+
+# ===== IDE / Editor =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Testing & Coverage =====
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ===== Logs =====
+*.log
+logs/
+
+# ===== Data =====
+data/
+recordings/
+*.wav
+*.mp3
+
+# ===== Pre-commit cache =====
+.pre-commit-cache/
