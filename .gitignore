@@ -53,3 +53,10 @@ recordings/
 
 # ===== Pre-commit cache =====
 .pre-commit-cache/
+
+# ===== Binaries and installers =====
+*.tgz
+*.tar.gz
+*.zip
+ngrok
+ngrok-v3-*
