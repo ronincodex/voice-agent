@@ -17,17 +17,10 @@ from loguru import logger
 
 load_dotenv()
 
+from pipecat.transports.daily.transport import DailyParams, DailyTransport  # noqa: E402
 from pipecat.workers.runner import WorkerRunner  # noqa: E402
 
 from voice_agent.pipeline.agent_pipeline import create_agent_pipeline  # noqa: E402
-
-# ===== CRITICAL: Load .env BEFORE any os.getenv() calls =====
-# This must run before we read DAILY_ROOM_URL from the environment.
-# Pydantic Settings loads .env for its own class, but the standard
-# os.getenv() function does NOT read .env files. We bridge that gap here.
-
-# Add the src directory to the Python path so we can import voice_agent
-# sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 async def main() -> None:
@@ -50,8 +43,21 @@ async def main() -> None:
         sys.exit(1)
 
     logger.info(f"Starting voice agent in {args.language}...")
-    task = await create_agent_pipeline(
+
+    # Create the Daily transport here. This is the "Adapter" step:
+    # the caller knows which transport to use; the pipeline does not.
+    transport = DailyTransport(
         room_url=room_url,
+        token=None,
+        bot_name="AI Assistant",
+        params=DailyParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+        ),
+    )
+
+    task = await create_agent_pipeline(
+        transport=transport,
         language_code=args.language,
     )
 

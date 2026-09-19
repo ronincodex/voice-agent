@@ -28,12 +28,29 @@ class Settings(BaseSettings):
     groq_api_key: str
     daily_api_key: str | None = None
 
+    # ===== Telephony: Voibz =====
+    vobiz_auth_id: str = ""
+    vobiz_auth_token: str = ""
+    vobiz_phone_number: str = ""
+    # plivo_auth_id: str = ""
+    # plivo_auth_token: str = ""
+    # plivo_phone_number: str = "" # The US number, e.g., "+1415lXXXXXXX"
+    # twilio_api_key: str = ""      # Optional: API Key SID (starts with SK)
+    # twilio_api_secret: str = ""   # Optional: API Key Secret
+    # exotel_api_key: str = ""
+    # exotel_api_token: str = ""
+    # exotel_account_sid: str = ""
+    # exotel_phone_number: str = ""
+    # exotel_subdomain: str = "api.exotel.com"
+    # exotel_flow_app: str = "" # The ~appid~ from the Exotel flow
+
     # ===== Application Defaults =====
     default_language: str = "hi-IN"
 
     # ===== Model Selection =====
     groq_model: str = "openai/gpt-oss-20b"
     sarvam_stt_model: str = "saaras:v3"
+    sarvam_stt_mode: str = "codemix"
     sarvam_tts_model: str = "bulbul:v3"
 
 

@@ -5,12 +5,17 @@ description = "Multilingual AI Voice Calling Agent with Indian language support"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pipecat-ai[sarvam,daily]>=0.0.60",
+    "pipecat-ai[sarvam,daily,websocket]>=1.10.0,<2.0.0",
+    "pipecat-vobiz>=0.0.3,<0.1",
     "groq>=0.15.0",
     "python-dotenv>=1.0.0",
     "loguru>=0.7.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
+    "httpx>=0.28.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "python-multipart>=0.0.20",
 ]
 
 [project.optional-dependencies]
@@ -60,3 +65,6 @@ python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+mypy_path = "src"
+explicit_package_bases = true
+warn_unused_ignores = false
