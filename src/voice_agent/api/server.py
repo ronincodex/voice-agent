@@ -38,6 +38,9 @@ settings = get_settings()
 app = FastAPI(title="Voice Agent Telephony API")
 vobiz_client = VobizClient()
 
+# Maps call_id -> WebSocket for graceful shutdown when the call ends
+_active_websockets: dict[str, WebSocket] = {}
+
 
 @app.on_event("startup")
 async def start_call_timeout_monitor() -> None:
@@ -115,6 +118,19 @@ async def trigger_call(request: Request) -> dict[str, Any]:
             detail="'to' and 'answer_url' are required",
         )
 
+    # Reject placeholder URLs before they reach Vobiz
+    placeholder_markers = ("YOUR-NGROK", "your-ngrok", "example.com", "<")
+    for field_name, field_value in (
+        ("answer_url", answer_url),
+        ("hangup_url", hangup_url),
+        ("ring_url", ring_url),
+    ):
+        if field_value and any(m in field_value for m in placeholder_markers):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{field_name}' contains a placeholder URL: {field_value}",
+            )
+
     # Append language as query param so /answer can read it
     answer_with_lang = f"{answer_url}?language={language}"
 
@@ -146,7 +162,10 @@ async def answer_webhook(request: Request) -> HTMLResponse:
     language = request.query_params.get("language", "hi-IN")
 
     logger.info(f"VobizXML requested for call {call_uuid}, language={language}")
-
+    # Mark the call as answered so the timeout monitor doesn't fire mid-call
+    state = get_call(call_uuid)
+    if state:
+        state.mark_answered()
     # Build the WebSocket URL from the incoming Host header
     host = request.headers.get("host", "")
     ws_url = f"wss://{host}/ws?language={language}"
@@ -183,6 +202,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     Audio flows bidirectionally through the Pipecat pipeline.
     """
     await websocket.accept()
+    # We don't have call_id yet, read it from the first message, then register
     logger.info("Vobiz WebSocket connection accepted")
 
     language = websocket.query_params.get("language", "hi-IN")
@@ -207,6 +227,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     stream_id = parsed["stream_id"]
     call_id = parsed["call_id"]
+    # Register this Websocket so /hangup can close it
+    _active_websockets[call_id] = websocket
     encoding = parsed["encoding"]
     sample_rate = parsed["sample_rate"]
 
@@ -265,6 +287,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         # Vobiz does NOT send an inbound stop event.
         # The WebSocket close is the end-of-stream signal.
         # Flush per-call state here: generate summary, save transcript, etc.
+        _active_websockets.pop(call_id, None)
         logger.info(f"Vobiz stream ended for call {call_id}")
 
 
@@ -304,6 +327,15 @@ async def hangup_webhook(request: Request) -> dict[str, Any]:
         else:
             state.mark_ended("completed")
             logger.info(f"Call {call_uuid} completed normally")
+
+        # Close the WebSocket regardless of outcome
+        ws = _active_websockets.pop(call_uuid, None)
+        if ws is not None:
+            try:
+                await ws.close(code=1000)
+                logger.info(f"Closed Websocket for call {call_uuid}")
+            except Exception as e:
+                logger.warning(f"Failed to close WebScoket: {e}")
 
     return {"status": "received"}
 
