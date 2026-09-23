@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     default_language: str = "hi-IN"
 
     # ===== Model Selection =====
-    groq_model: str = "openai/gpt-oss-20b"
+    sarvam_llm_model: str = "sarvam-105b-conversations"
     sarvam_stt_model: str = "saaras:v3"
     sarvam_stt_mode: str = "codemix"
     sarvam_tts_model: str = "bulbul:v3"

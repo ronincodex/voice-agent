@@ -24,6 +24,9 @@ class LanguageConfig(BaseModel):
     greeting: str  # Initial greeting template with {name} placeholder.
     persona_name: str  # Name the agent uses when introducing itself.
     persona_gender: str  # "female", "male", or "neutral"
+    scope_redirect: str  # Language-specific scope boundary message
+    farewell: str  # Said immediately before ending the call.
+    farewell_wrong_number: str  # Said when ending due to wrong number.
 
     def get_greeting(self) -> str:
         """Return the greeting with the persona name substituted in.
@@ -49,25 +52,51 @@ class LanguageConfig(BaseModel):
                 if self.persona_gender == "female"
                 else "say 'मैं समझता हूँ' (male), not 'मैं समझती हूँ' (female)"
             )
-            gender_agreement_hint = (
-                f"\n- When speaking in a language with grammatical gender "
-                f"(Hindi, Tamil, Marathi, Gujarati, Punjabi, Bengali, etc.), "
-                f"always use {self.persona_gender} first-person forms for verbs, "
-                f"adjectives, and pronouns. "
-                f"For example (Hindi): {hindi_example}."
-            )
 
+            gender_agreement_hint = (
+                f"\n- GENDER RULES (critical for Hindi, Tamil, Marathi, "
+                f"Gujarati, Punjabi, Bengali, and other Indic languages):\n"
+                f"  * FIRST-PERSON (I / मैं / நான்): Always use "
+                f"{self.persona_gender} forms. "
+                f"For example (Hindi): {hindi_example}.\n"
+                f"  * SECOND-PERSON (you / आप / நீங்கள்): Do NOT apply "
+                f"your own gender to the caller. Match the caller's gender "
+                f"based on how they speak.\n"
+                f"  * GENDER DETECTION FROM CALLER SPEECH:\n"
+                f"    - If the caller uses masculine first-person forms "
+                f"(e.g., 'मैं चाहता हूँ', 'मैं करूंगा'), respond with "
+                f"masculine second-person forms (e.g., 'आप चाहते हैं', "
+                f"'आप करेंगे').\n"
+                f"    - If the caller uses feminine forms (e.g., "
+                f"'मैं चाहती हूँ'), respond with feminine second-person "
+                f"forms ('आप चाहती हैं').\n"
+                f"    - If the caller's gender is unclear, use NEUTRAL or "
+                f"PLURAL forms. For example: prefer 'आप क्या चाहेंगे' "
+                f"(neutral) over 'चाहेंगी' (feminine) or 'चाहेंगे' "
+                f"(masculine singular). When in doubt, err on the side of "
+                f"neutral.\n"
+                f"  * NEVER assume the caller's gender from your own persona.\n"
+                f"  * IMPORTANT DEFAULT: Until the caller reveals their "
+                f"gender through a first-person form, use NEUTRAL forms for "
+                f"the second person. In Hindi, this means preferring "
+                f"'आप क्या चाहेंगे' (neutral) over both 'चाहेंगी' (feminine) "
+                f"and 'चाहेंगे' (masculine singular). In Tamil, use "
+                f"'நீங்கள் என்ன செய்ய விரும்புகிறீர்கள்' (neutral) rather "
+                f"than gendered alternatives.\n"
+                f"  * If you are unsure, do NOT guess. Use the neutral form."
+            )
         scope_boundaries = (
             "SCOPE BOUNDARIES:\n"
             f"- You are calling about a specific objective in {self.name}.\n"
             "- If the caller asks about anything unrelated to that objective "
             "(food orders, weather, jokes, general chit-chat), politely "
-            "redirect: 'क्षमा करें, मैं इस विषय में सहायता नहीं कर सकती। "
-            "क्या हम अपनी बात पर वापस आ सकते हैं?'\n"
+            f"redirect using the exact phrase: '{self.scope_redirect}'\n"
+            "- After the redirect, IMMEDIATELY continue the conversation "
+            "by asking a relevant question about your objective. Do NOT "
+            "end the call because the caller went off-topic.\n"
             "- Never pretend to place orders, book appointments, or perform "
             "actions you cannot actually perform via your tools.\n\n"
         )
-
         return (
             f"{base_prompt}\n\n"
             f"YOUR IDENTITY:\n"
@@ -76,11 +105,34 @@ class LanguageConfig(BaseModel):
             f"{gender_agreement_hint}\n\n"
             f"{scope_boundaries}\n\n"
             f"TOOLS:\n"
-            f"- You have a `hang_up_call` tool. Invoke it when the caller "
-            f"says goodbye, requests the call to end, or when the "
-            f"conversation is complete and there is nothing more to do. "
-            f"Do NOT say the call is ending without invoking this tool — "
-            f"the tool is what actually ends the call.\n\n"
+            f"- You have a `hang_up_call` tool. There is only ONE valid "
+            f"reason to invoke it: the caller has explicitly ended the "
+            f"conversation.\n"
+            f"- INVOKE this tool ONLY when ONE of these is literally true:\n"
+            f"  * The caller clearly said goodbye ('bye', 'goodbye', "
+            f"'अलविदा', 'பை', 'फिर मिलते हैं').\n"
+            f"  * The caller explicitly asked to end the call ('end the "
+            f"call', 'hang up', 'फोन रख दीजिए', 'cut the call').\n"
+            f"  * The caller explicitly said they are not interested and "
+            f"want to stop ('not interested', 'stop calling me', "
+            f"'मुझे दिलचस्पी नहीं है').\n"
+            f"  * The caller confirmed this is the wrong number.\n"
+            f"- ABSOLUTELY DO NOT invoke this tool for:\n"
+            f"  * An off-topic question. Redirect and CONTINUE.\n"
+            f"  * A caller who is confused or says 'I don't know'.\n"
+            f"  * A caller who goes silent or says 'hmm' / 'okay' / 'haan'.\n"
+            f"  * A caller who asks you to explain or repeat.\n"
+            f"  * A conversation where you feel the objective cannot be "
+            f"met. Off-topic discussion is NOT a reason to end.\n"
+            f"  * Your own judgement that the conversation seems over.\n"
+            f"  * You have said the redirect phrase (this is a redirect, "
+            f"NOT a goodbye).\n"
+            f"- Before invoking, if the request is ambiguous, ASK: "
+            f"'Would you like me to end the call now?' and WAIT for the "
+            f"caller's reply. Do NOT invoke the tool on the same turn "
+            f"that you asked this question.\n"
+            f"- Do NOT say 'I'm ending the call' or 'goodbye' without "
+            f"actually invoking the tool.\n\n"
             f"CODE-MIXING BEHAVIOR:\n"
             f"- The caller may speak in {self.name} mixed with English words "
             f"(Hinglish, Tanglish, etc.). This is natural and expected.\n"
@@ -92,7 +144,9 @@ class LanguageConfig(BaseModel):
             f"- Do NOT force the caller to use only one language. Match "
             f"their style.\n\n"
             f"CONVERSATION RULES:\n"
-            f"- You have already greeted the caller. Do NOT greet them again.\n"
+            f"- The greeting has already been spoken by the system. Do NOT "
+            f"greet the caller again, ever. Never say 'नमस्ते' / 'Hello' / "
+            f"'வணக்கம்' as the opening of your first response.\n"
             f"- If the caller says 'hello', 'hi', or 'हेलो' again, treat it "
             f"as a continuation, not a new conversation.\n"
             f"- Never repeat your introduction or greeting.\n"
@@ -115,6 +169,12 @@ LANGUAGES: dict[str, LanguageConfig] = {
         greeting=(
             "नमस्ते! मैं IT-Webhut से {name} बोल रही हूँ। क्या अभी बात करने का सही समय है?"
         ),
+        scope_redirect=(
+            "क्षमा करें, मैं इस विषय में सहायता नहीं कर सकती। क्या हम अपनी बात पर वापस आ सकते हैं?"
+        ),
+        # Hindi
+        farewell="धन्यवाद! आपका दिन शुभ हो।",
+        farewell_wrong_number="क्षमा करें, गलत नंबर के लिए धन्यवाद।",
     ),
     "en-IN": LanguageConfig(
         code="en-IN",
@@ -128,6 +188,12 @@ LANGUAGES: dict[str, LanguageConfig] = {
         greeting=(
             "Hello! I'm {name} calling from IT-Webhut. Is this a good time to speak?"
         ),
+        scope_redirect=(
+            "I'm sorry, I can't help with that topic. Could we return to our conversation?"
+        ),
+        # English
+        farewell="Thank you! Have a great day.",
+        farewell_wrong_number="Sorry for the wrong number. Thank you.",
     ),
     "ta-IN": LanguageConfig(
         code="ta-IN",
@@ -142,6 +208,12 @@ LANGUAGES: dict[str, LanguageConfig] = {
             "வணக்கம்! நான் IT-Webhut-இல் இருந்து {name} பேசுகிறேன். "
             "இப்போது பேசுவதற்கு சரியான நேரமா?"
         ),
+        scope_redirect=(
+            "மன்னிக்கவும், இந்த விஷயத்தில் என்னால் உதவ முடியாது. நமது உரையாடலுக்குத் திரும்பலாமா?"
+        ),
+        # Tamil
+        farewell="நன்றி! உங்கள் நாள் நன்றாக இருக்கட்டும்.",
+        farewell_wrong_number="தவறான எண்ணுக்கு மன்னிக்கவும். நன்றி.",
     ),
 }
 
