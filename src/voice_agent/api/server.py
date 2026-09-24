@@ -23,8 +23,10 @@ from pipecat.transports.websocket.fastapi import (
 )
 from pipecat.workers.runner import WorkerRunner
 
+from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
 from voice_agent.pipeline.agent_pipeline import create_agent_pipeline
+from voice_agent.pipeline.nodes import build_initial_node
 from voice_agent.telephony.call_state import (
     CallStatus,
     get_call,
@@ -271,11 +273,25 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         ),
     )
 
-    task = await create_agent_pipeline(
+    task, flow_manager = await create_agent_pipeline(
         transport=transport,
         language_code=language,
         audio_out_sample_rate=8000,  # Telephony output rate
     )
+    # Vobiz does not fire on_client_connected, so we initialized the flow
+    # afer a short delay to let the transport fully connect.
+
+    lang_config = get_language_config(language)
+
+    async def _start_flow() -> None:
+        await asyncio.sleep(2.0)
+        try:
+            await flow_manager.initialize(build_initial_node(lang_config))
+            logger.info(f"Flow initialized for call {call_id}")
+        except Exception as e:
+            logger.error(f"Flow initialization failed: {e}")
+
+    asyncio.create_task(_start_flow())
 
     try:
         runner = WorkerRunner()
