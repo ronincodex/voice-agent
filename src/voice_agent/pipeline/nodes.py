@@ -15,7 +15,6 @@ from typing import Any
 
 from loguru import logger
 from pipecat.flows import FlowManager, NodeConfig
-
 from voice_agent.config.languages import LanguageConfig
 from voice_agent.pipeline.validators import (
     is_affirmative_reply,
@@ -51,7 +50,13 @@ async def record_interest(
     interest: str,
 ) -> tuple[dict[str, Any], NodeConfig]:
     """Record what the caller is interested in and continue qualification."""
-    flow_manager.state["interest"] = interest
+    redis = flow_manager.state.get("redis")
+    call_id = flow_manager.state.get("call_id", "unknown")
+
+    if redis and call_id != "unknown":
+        await redis.update(call_id, interest=interest)
+
+    flow_manager.state["interest"] = interest  # in-memory cache
     logger.info(f"[flows] record_interest: {interest!r}")
     return (
         {"status": "recorded", "interest": interest},
@@ -65,9 +70,18 @@ async def record_refusal(
     reason: str = "not_interested",
 ) -> tuple[dict[str, Any], NodeConfig]:
     """Record a refusal. Two refusals in a row transition to `confirm`."""
+    redis = flow_manager.state.get("redis")
+    call_id = flow_manager.state.get("call_id", "unknown")
     refusals = flow_manager.state.get("refusal_count", 0) + 1
     flow_manager.state["refusal_count"] = refusals
     flow_manager.state["last_refusal_reason"] = reason
+
+    if redis and call_id != "unknown":
+        await redis.update(
+            call_id,
+            refusal_count=refusals,
+            last_refusal_reason=reason,
+        )
     logger.info(f"[flows] record_refusal #{refusals}: {reason!r}")
 
     if refusals >= 2:
@@ -113,6 +127,8 @@ async def hang_up_call(
 ) -> tuple[dict[str, Any], NodeConfig | None]:
     """End the phone call. Only registered in `confirm` and `closing` nodes."""
     session_state = _get_session_state(flow_manager)
+    redis = flow_manager.state.get("redis")
+    call_id = flow_manager.state.get("call_id", "unknown")
 
     if session_state is None:
         logger.error("[flows] session_state missing from flow_manager.state")
@@ -140,8 +156,11 @@ async def hang_up_call(
         )
 
     if not allowed:
-        logger.warning("[flows] hang_up_call BLOCKED — arming confirmation_pending")
+        logger.warning("[flows] hang_up_call BLOCKED: arming confirmation_pending")
         session_state.confirmation_pending = True
+        if redis and call_id != "unknown":
+            await redis.update(call_id, confirmation_pending=True)
+
         return (
             {
                 "status": "blocked",
@@ -159,6 +178,12 @@ async def hang_up_call(
     logger.info("[flows] hang_up_call CONFIRMED — transitioning to closing")
     session_state.confirmation_pending = False
     flow_manager.state["close_reason"] = reason
+    if redis and call_id != "unknown":
+        await redis.update(
+            call_id,
+            confirmation_pending=False,
+            close_reason=reason,
+        )
     return (
         {"status": "confirmed", "reason": reason},
         _build_closing_node(flow_manager),
