@@ -269,9 +269,39 @@ async def create_agent_pipeline(
         if content:
             session_state.last_assistant_utterance = content
             logger.debug(f"Assistant turn recorded: {content[:80]!r}")
+
+            # Persist to Supabase
+            supabase = flow_manager.state.get("supabase")
+            internal_call_id = flow_manager.state.get("internal_call_id")
+            if supabase and internal_call_id:
+                try:
+                    await supabase.save_message(
+                        call_id=internal_call_id,
+                        role="assistant",
+                        text=content,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to persist assistant message: {e}")
             if was_confirmation_question(content):
                 session_state.confirmation_pending = True
                 logger.debug("[flows] confirmation_pending armed by assistant question")
+
+    @context_aggregator.user().event_handler("on_user_turn_stopped")  # type: ignore[misc, untyped-decorator]
+    async def _on_user_turn_stopped(aggregator: Any, message: Any) -> None:
+        content = getattr(message, "content", None)
+        if content:
+            session_state.last_user_utterance = content
+            supabase = flow_manager.state.get("supabase")
+            internal_call_id = flow_manager.state.get("internal_call_id")
+            if supabase and internal_call_id:
+                try:
+                    await supabase.save_message(
+                        call_id=internal_call_id,
+                        role="user",
+                        text=content,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to persist user message: {e}")
 
     # ====== 6. Pipeline ======
     pipeline = Pipeline(
@@ -313,9 +343,6 @@ async def create_agent_pipeline(
     )
 
     # Store lang_config for node builders to access.
-    flow_manager.state["session_state"] = session_state
-    flow_manager.state["lang_config"] = lang_config
-
     # Store all shared state in flow_manager.state
     flow_manager.state["session_state"] = session_state
     flow_manager.state["lang_config"] = lang_config
@@ -323,5 +350,8 @@ async def create_agent_pipeline(
     flow_manager.state["supabase"] = supabase_store
     # call_id is set by the WebSocket handler before pipeline creation
     flow_manager.state["call_id"] = call_id
+    # NOTE: internal_call_id is set by server.py AFTER this function returns,
+    # because the Supabase call record is created there, not here.
+    # flow_manager.state["internal_call_id"] = internal_call_id
 
     return task, flow_manager

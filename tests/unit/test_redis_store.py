@@ -29,7 +29,7 @@ async def main() -> None:
     await store.delete(call_id)
     assert await store.get(call_id) is None
 
-    print("ReddisSessionStore tests passed")
+    print("RedisSessionStore tests passed")
 
 
 if __name__ == "__main__":

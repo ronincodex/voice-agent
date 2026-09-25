@@ -15,6 +15,7 @@ from typing import Any
 
 from loguru import logger
 from pipecat.flows import FlowManager, NodeConfig
+
 from voice_agent.config.languages import LanguageConfig
 from voice_agent.pipeline.validators import (
     is_affirmative_reply,
@@ -113,6 +114,10 @@ async def handle_wrong_number(
         )
 
     flow_manager.state["close_reason"] = "wrong_number"
+    redis = flow_manager.state.get("redis")
+    call_id = flow_manager.state.get("call_id", "unknown")
+    if redis and call_id != "unknown":
+        await redis.update(call_id, close_reason="wrong_number")
     logger.info("[flows] wrong number confirmed: transitioning to closing")
     return (
         {"status": "wrong_number_confirmed"},
