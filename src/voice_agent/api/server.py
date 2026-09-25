@@ -344,18 +344,23 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
 @app.post("/hangup")
 async def hangup_webhook(request: Request) -> dict[str, Any]:
-    """Authoritative end-of-call signal from Vobiz."""
+    """Authoritative end-of-call signal from Vobiz.
+
+    Marks the call state, persists to Supabase, and closes the WebSocket.
+    """
     body = await request.form()
     call_uuid = str(body.get("CallUUID", "unknown"))
+    duration = int(str(body.get("Duration", "0")))
+    call_status = str(body.get("CallStatus", "completed"))
     hangup_cause = str(body.get("HangupCause", ""))
     hangup_cause_name = str(body.get("HangupCauseName", ""))
-    call_status = str(body.get("CallStatus", "completed"))
 
     logger.info(
         f"Hangup callback: CallUUID={call_uuid}, "
-        f"status={call_status}, cause={hangup_cause_name}"
+        f"status={call_status}, cause={hangup_cause_name}, duration={duration}s"
     )
 
+    # 1. Update in-memory state
     state = get_call(call_uuid)
     if state:
         FAILURE_STATUSES: tuple[str, ...] = (
@@ -375,13 +380,27 @@ async def hangup_webhook(request: Request) -> dict[str, Any]:
             state.mark_ended("completed")
             logger.info(f"Call {call_uuid} completed normally")
 
-        ws = _active_websockets.pop(call_uuid, None)
-        if ws is not None:
-            try:
-                await ws.close(code=1000)
-                logger.info(f"Closed WebSocket for call {call_uuid}")
-            except Exception as e:
-                logger.warning(f"Failed to close WebSocket: {e}")
+    # 2. Persist to Supabase (failure does not block cleanup)
+    try:
+        supabase = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
+        await supabase.update_call(
+            call_uuid,
+            status=call_status,
+            ended_at=datetime.now(UTC).isoformat(),
+            duration_seconds=duration,
+        )
+        logger.info(f"Call {call_uuid} persisted to Supabase")
+    except Exception as e:
+        logger.error(f"Failed to persist call {call_uuid} to Supabase: {e}")
+
+    # 3. Close WebSocket (always, regardless of Supabase outcome)
+    ws = _active_websockets.pop(call_uuid, None)
+    if ws is not None:
+        try:
+            await ws.close(code=1000)
+            logger.info(f"Closed WebSocket for call {call_uuid}")
+        except Exception as e:
+            logger.warning(f"Failed to close WebSocket: {e}")
 
     return {"status": "received"}
 
