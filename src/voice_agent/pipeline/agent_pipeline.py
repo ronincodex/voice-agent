@@ -16,11 +16,7 @@ from typing import Any
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.flows import FlowManager
-from pipecat.frames.frames import (
-    Frame,
-    TextFrame,
-    TranscriptionFrame,
-)
+from pipecat.frames.frames import Frame, TextFrame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -35,9 +31,9 @@ from pipecat.services.sarvam.tts import SarvamTTSService
 
 from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
-from voice_agent.pipeline.validators import (
-    was_confirmation_question,
-)
+from voice_agent.db.supabase_client import SupabaseStore
+from voice_agent.pipeline.validators import was_confirmation_question
+from voice_agent.state.redis_store import RedisSessionStore
 
 settings = get_settings()
 # Strong references to fire-and-forget bckground tasks.
@@ -196,6 +192,7 @@ async def create_agent_pipeline(
     transport: Any,
     language_code: str = "hi-IN",
     audio_out_sample_rate: int = 24000,
+    call_id: str = "unknown",
 ) -> tuple[PipelineTask, FlowManager]:
     """Create and configure the voice agent pipeline with Pipecat Flows.
 
@@ -211,6 +208,15 @@ async def create_agent_pipeline(
     # and the Flows handlers. Stored in flow_manager.state so nodes.py
     # can read from it.
     session_state = CallSessionState()
+    # External state stores
+    redis_store = RedisSessionStore(
+        url=settings.upstash_redis_rest_url,
+        token=settings.upstash_redis_rest_token,
+    )
+    supabase_store = SupabaseStore(
+        url=settings.supabase_url,
+        service_key=settings.supabase_service_key,
+    )
 
     # ====== 1. STT ======
     stt = SarvamSTTService(
@@ -309,5 +315,13 @@ async def create_agent_pipeline(
     # Store lang_config for node builders to access.
     flow_manager.state["session_state"] = session_state
     flow_manager.state["lang_config"] = lang_config
+
+    # Store all shared state in flow_manager.state
+    flow_manager.state["session_state"] = session_state
+    flow_manager.state["lang_config"] = lang_config
+    flow_manager.state["redis"] = redis_store
+    flow_manager.state["supabase"] = supabase_store
+    # call_id is set by the WebSocket handler before pipeline creation
+    flow_manager.state["call_id"] = call_id
 
     return task, flow_manager
