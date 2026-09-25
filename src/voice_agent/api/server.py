@@ -4,6 +4,7 @@ Exposes:
     - GET  /health          : Health check
     - POST /call            : Trigger an outbound call
     - POST /answer          : VobizXML webhook — tells Vobiz where to stream audio
+    - POST /incoming        : VobizXML webhook — inbound call handling
     - POST /hangup          : Call hangup webhook (authoritative end-of-call signal)
     - WS   /ws              : WebSocket endpoint for Vobiz Media Streams
     - POST /recording-ready : Recording callback from Vobiz
@@ -25,6 +26,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
+from voice_agent.db.supabase_client import SupabaseStore
 from voice_agent.pipeline.agent_pipeline import create_agent_pipeline
 from voice_agent.pipeline.nodes import build_initial_node
 from voice_agent.telephony.call_state import (
@@ -81,6 +83,51 @@ async def list_languages() -> dict[str, Any]:
     }
 
 
+def resolve_language_for_inbound(dialed_number: str) -> str:
+    """Map the dialed number (DNIS) to a language.
+
+    In production this queries a `phone_numbers` table.
+    For the prototype, use an in-memory mapping.
+    """
+    DNIS_MAP = {
+        "+91XXXXXXXXXX": "hi-IN",
+        "+91YYYYYYYYYY": "en-IN",
+        "+91ZZZZZZZZZZ": "ta-IN",
+    }
+    return DNIS_MAP.get(dialed_number, "hi-IN")
+
+
+@app.post("/incoming")
+async def incoming_webhook(request: Request) -> HTMLResponse:
+    """Vobiz fetches this when an inbound call arrives.
+
+    Returns VobizXML that records the call and opens a WebSocket.
+    """
+    form = await request.form()
+    from_number = str(form.get("From", "unknown"))
+    to_number = str(form.get("To", "unknown"))
+
+    language = resolve_language_for_inbound(to_number)
+
+    host = request.headers.get("host", "")
+    ws_url = f"wss://{host}/ws?language={language}&direction=inbound"
+
+    vobiz_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+    <Record action="https://{host}/recording-ready" method="POST"
+    recordSession="true" redirect="false" maxLength="3600" playBeep="false"/>
+    <Stream bidirectional="true" keepCallAlive="true"
+    contentType="audio/x-mulaw;rate=8000">
+    {ws_url}
+    </Stream>
+    </Response>"""
+
+    logger.info(
+        f"Inbound call: from={from_number}, to={to_number}, language={language}"
+    )
+    return HTMLResponse(content=vobiz_xml, media_type="application/xml")
+
+
 @app.post("/ring")
 async def ring_webhook(request: Request) -> dict[str, Any]:
     """Vobiz sends 'ringing' status here."""
@@ -120,7 +167,6 @@ async def trigger_call(request: Request) -> dict[str, Any]:
             detail="'to' and 'answer_url' are required",
         )
 
-    # Reject placeholder URLs before they reach Vobiz
     placeholder_markers = ("YOUR-NGROK", "your-ngrok", "example.com", "<")
     for field_name, field_value in (
         ("answer_url", answer_url),
@@ -133,7 +179,6 @@ async def trigger_call(request: Request) -> dict[str, Any]:
                 detail=f"'{field_name}' contains a placeholder URL: {field_value}",
             )
 
-    # Append language as query param so /answer can read it
     answer_with_lang = f"{answer_url}?language={language}"
 
     result = await vobiz_client.make_outbound_call(
@@ -143,7 +188,6 @@ async def trigger_call(request: Request) -> dict[str, Any]:
         ring_url=ring_url,
     )
 
-    # Register the call in the state tracker
     call_uuid = result.get("request_uuid", "unknown")
     register_call(call_uuid, to_number, language)
     logger.info(f"Registered call {call_uuid} for tracking")
@@ -164,20 +208,14 @@ async def answer_webhook(request: Request) -> HTMLResponse:
     language = request.query_params.get("language", "hi-IN")
 
     logger.info(f"VobizXML requested for call {call_uuid}, language={language}")
-    # Mark the call as answered so the timeout monitor doesn't fire mid-call
+
     state = get_call(call_uuid)
     if state:
         state.mark_answered()
-    # Build the WebSocket URL from the incoming Host header
+
     host = request.headers.get("host", "")
     ws_url = f"wss://{host}/ws?language={language}"
 
-    # VobizXML: <Record> wraps <Stream> must be SIBLING elements, not nested.
-    # <Record> must be self-closing and placed BEFORE <stream>.
-    # This structure allows simultaneous recording and reall-time streaming.
-    # `contentType="audio/x-mulaw;rate=8000"` matches standard telephony audio.
-    # `keepCallAlive="true"` prevents Vobiz from hanging up when the stream
-    # disconnects — it waits for the call to end naturally.
     vobiz_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
     <Record action="https://{host}/recording-ready"
@@ -198,28 +236,23 @@ async def answer_webhook(request: Request) -> HTMLResponse:
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
-    """WebSocket endpoint for Vobiz Media Streams.
-
-    Vobiz opens this connection after reading the VobizXML from /answer.
-    Audio flows bidirectionally through the Pipecat pipeline.
-    """
+    """WebSocket endpoint for Vobiz Media Streams."""
     await websocket.accept()
-    # We don't have call_id yet, read it from the first message, then register
+
     logger.info("Vobiz WebSocket connection accepted")
 
     language = websocket.query_params.get("language", "hi-IN")
-    logger.info(f"Starting pipeline in language: {language}")
+    direction = websocket.query_params.get("direction", "outbound")
+    logger.info(f"WebSocket connected: language={language}, direction={direction}")
 
-    # Parse the Vobiz `start` event using the official parser.
-    # IMPORTANT: parse_vobiz_start() returns a DICT, not an object.
-    # Keys are snake_case: "stream_id", "call_id", "encoding", "sample_rate".
+    # Parse the Vobiz `start` event. parse_vobiz_start() returns a DICT.
     try:
         parsed = await asyncio.wait_for(
             parse_vobiz_start(websocket),
             timeout=30.0,
         )
     except TimeoutError:
-        logger.error("Time out waiting for Vobiz start event (30s)")
+        logger.error("Timeout waiting for Vobiz start event (30s)")
         await websocket.close()
         return
     except Exception as e:
@@ -229,22 +262,16 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     stream_id = parsed["stream_id"]
     call_id = parsed["call_id"]
-    # Register this Websocket so /hangup can close it
-    _active_websockets[call_id] = websocket
     encoding = parsed["encoding"]
     sample_rate = parsed["sample_rate"]
+
+    _active_websockets[call_id] = websocket
 
     logger.info(
         f"Vobiz stream started: streamId={stream_id}, "
         f"callId={call_id}, encoding={encoding}, sampleRate={sample_rate}"
     )
 
-    # Build the VobizFrameSerializer from the parsed start event.
-    # The serializer handles base64 decoding, byte order, resampling,
-    # interruption signalling, and call teardown.
-    # `sample_rate=None` tells the serializer to use its internal
-    # stream resampler instead of assuming the wire rate equals the
-    # pipeline rate.
     serializer = VobizFrameSerializer(
         stream_id=stream_id,
         call_id=call_id,
@@ -259,16 +286,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         ),
     )
 
-    # CRITICAL: do NOT set audio_in_sample_rate or audio_out_sample_rate
-    # on the transport params. The serializer negotiates the wire format
-    # from the `start` event. The pipeline's output sample rate is set
-    # separately on PipelineTask via create_agent_pipeline(audio_out_sample_rate=8000).
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            add_wav_header=False,  # CRITICAL: must be False for telephony
+            add_wav_header=False,
             serializer=serializer,
         ),
     )
@@ -276,10 +299,25 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     task, flow_manager = await create_agent_pipeline(
         transport=transport,
         language_code=language,
-        audio_out_sample_rate=8000,  # Telephony output rate
+        audio_out_sample_rate=8000,
+        call_id=call_id,
     )
-    # Vobiz does not fire on_client_connected, so we initialized the flow
-    # afer a short delay to let the transport fully connect.
+
+    # Register the call in Supabase and store the internal UUID
+    try:
+        supabase = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
+        internal_call_id = await supabase.create_call(
+            call_uuid=call_id,
+            direction=direction,
+            from_number="",
+            to_number="",
+            language=language,
+        )
+        flow_manager.state["internal_call_id"] = internal_call_id
+        logger.info(f"Supabase call record created: {internal_call_id}")
+    except Exception as e:
+        logger.error(f"Failed to create Supabase call record: {e}")
+        flow_manager.state["internal_call_id"] = None
 
     lang_config = get_language_config(language)
 
@@ -300,20 +338,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except Exception as e:
         logger.error(f"Pipeline error: {e}")
     finally:
-        # Vobiz does NOT send an inbound stop event.
-        # The WebSocket close is the end-of-stream signal.
-        # Flush per-call state here: generate summary, save transcript, etc.
         _active_websockets.pop(call_id, None)
         logger.info(f"Vobiz stream ended for call {call_id}")
 
 
 @app.post("/hangup")
 async def hangup_webhook(request: Request) -> dict[str, Any]:
-    """Authoritative end-of-call signal from Vobiz.
-
-    Detects failure statuses (busy, no-answer, failed, timeout, cancel)
-    and marks the call state accordingly.
-    """
+    """Authoritative end-of-call signal from Vobiz."""
     body = await request.form()
     call_uuid = str(body.get("CallUUID", "unknown"))
     hangup_cause = str(body.get("HangupCause", ""))
@@ -344,14 +375,13 @@ async def hangup_webhook(request: Request) -> dict[str, Any]:
             state.mark_ended("completed")
             logger.info(f"Call {call_uuid} completed normally")
 
-        # Close the WebSocket regardless of outcome
         ws = _active_websockets.pop(call_uuid, None)
         if ws is not None:
             try:
                 await ws.close(code=1000)
-                logger.info(f"Closed Websocket for call {call_uuid}")
+                logger.info(f"Closed WebSocket for call {call_uuid}")
             except Exception as e:
-                logger.warning(f"Failed to close WebScoket: {e}")
+                logger.warning(f"Failed to close WebSocket: {e}")
 
     return {"status": "received"}
 
@@ -364,5 +394,4 @@ async def recording_ready(request: Request) -> dict[str, Any]:
     """
     body = await request.form()
     logger.info(f"Recording ready: {dict(body)}")
-    # In Part 3, download and store the recording in Supabase Storage
     return {"status": "received"}
