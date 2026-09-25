@@ -53,6 +53,20 @@ class Settings(BaseSettings):
     sarvam_stt_mode: str = "codemix"
     sarvam_tts_model: str = "bulbul:v3"
 
+    # ===== Redis (Upstash) ======
+    upstash_redis_rest_url: str = ""
+    upstash_redis_rest_token: str = ""
+
+    # ====== Database (Supabase) ======
+    supabase_url: str = ""
+    supabase_service_key: str = ""
+
+    # ====== Storage (Cloudflare R2) ======
+    r2_accont_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = "voice-recordings"
+
 
 @lru_cache
 def get_settings() -> Settings:
