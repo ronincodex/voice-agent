@@ -287,21 +287,49 @@ async def create_agent_pipeline(
                 logger.debug("[flows] confirmation_pending armed by assistant question")
 
     @context_aggregator.user().event_handler("on_user_turn_stopped")  # type: ignore[misc, untyped-decorator]
-    async def _on_user_turn_stopped(aggregator: Any, message: Any) -> None:
-        content = getattr(message, "content", None)
-        if content:
-            session_state.last_user_utterance = content
-            supabase = flow_manager.state.get("supabase")
-            internal_call_id = flow_manager.state.get("internal_call_id")
-            if supabase and internal_call_id:
-                try:
-                    await supabase.save_message(
-                        call_id=internal_call_id,
-                        role="user",
-                        text=content,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to persist user message: {e}")
+    async def _on_user_turn_stopped(aggregator: Any, *args: Any) -> None:
+        """Persist every caller utterance to Supabase.
+
+        Deduplication when Pipecat fires the event twice per turn
+        (once per registered stop strategy).
+        """
+        # The message is always the LAST positional argument
+        message = args[-1] if args else None
+        content = str(getattr(message, "content", "") or "").strip()
+
+        if not content:
+            return
+
+        # Dedup: same content within 1 second is a duplicate event
+        now = time.monotonic()
+        last_text = getattr(session_state, "_last_saved_user_text", "")
+        last_time = getattr(session_state, "_last_saved_user_time", 0.0)
+        if content == last_text and now - last_time < 1.0:
+            logger.debug(f"[user-turn] dedup skipped: {content[:40]!r}")
+            return
+        session_state._last_saved_user_text = content  # type: ignore[attr-defined]
+        session_state._last_saved_user_time = now  # type: ignore[attr-defined]
+
+        session_state.last_user_utterance = content
+
+        supabase = flow_manager.state.get("supabase")
+        internal_call_id = flow_manager.state.get("internal_call_id")
+
+        if not supabase or not internal_call_id:
+            logger.warning(
+                "[user-turn] missing supabase or internal_call_id, skipping persist"
+            )
+            return
+
+        try:
+            await supabase.save_message(
+                call_id=internal_call_id,
+                role="user",
+                text=content,
+            )
+            logger.debug(f"[user-turn] saved: {content[:40]!r}")
+        except Exception as e:
+            logger.error(f"[user-turn] failed to persist: {e}")
 
     # ====== 6. Pipeline ======
     pipeline = Pipeline(

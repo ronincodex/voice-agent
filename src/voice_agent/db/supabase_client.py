@@ -63,6 +63,7 @@ class SupabaseStore:
                 "latency_ms": latency_ms,
             }
         ).execute()
+        logger.debug(f"Supabase: saved {role} message for call {call_id}")
 
     async def update_call(self, call_uuid: str, **fields: Any) -> None:
         """Update a call record with any subset of fields."""

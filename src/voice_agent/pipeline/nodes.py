@@ -142,6 +142,22 @@ async def hang_up_call(
             None,
         )
 
+    # ----- IDEMPOTENCY: ignore repeat invocations afer confirmation -----
+    # The LLM sometimes calls hang_up_call twice in the same turn: one in
+    # `confirm` (which passesl and transitions to `closing`), then again in
+    # `closing` (where the guard would fail because confirmation_pending was
+    # just reset). Short-circuit here so the second call is a no-op.
+    existing_close_reason = flow_manager.state.get("close_reason")
+    if existing_close_reason:
+        logger.info(
+            f"[flows] hang_up_call already confirmed "
+            f"(close_reason={existing_close_reason!r}), ignoring repeat"
+        )
+        return (
+            {"status": "already_closing", "reason": existing_close_reason},
+            None,
+        )
+
     last_user = session_state.last_user_utterance
     last_assistant = session_state.last_assistant_utterance
     confirmation_pending = session_state.confirmation_pending
@@ -300,7 +316,7 @@ def _build_closing_node(
 ) -> NodeConfig:
     """Closing node — speak farewell and end the call."""
     if isinstance(flow_manager_or_config, FlowManager):
-        lang_config: LanguageConfig = flow_manager_or_config.state["lang_config"]
+        lang_config = flow_manager_or_config.state["lang_config"]
         close_reason = flow_manager_or_config.state.get(
             "close_reason", "user_requested"
         )
@@ -325,7 +341,7 @@ def _build_closing_node(
                 ),
             },
         ],
-        functions=[],
+        functions=[hang_up_call],  # keep tool list non-empty for Sarvam API
         respond_immediately=True,
         post_actions=[{"type": "end_conversation"}],
     )

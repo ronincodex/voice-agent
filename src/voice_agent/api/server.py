@@ -400,7 +400,7 @@ async def hangup_webhook(request: Request) -> dict[str, Any]:
             await ws.close(code=1000)
             logger.info(f"Closed WebSocket for call {call_uuid}")
         except Exception as e:
-            logger.warning(f"Failed to close WebSocket: {e}")
+            logger.debug(f"Failed to close WebSocket: {e}")
 
     return {"status": "received"}
 
