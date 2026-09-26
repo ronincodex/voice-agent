@@ -14,6 +14,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse
 from loguru import logger
@@ -29,6 +30,7 @@ from voice_agent.config.settings import get_settings
 from voice_agent.db.supabase_client import SupabaseStore
 from voice_agent.pipeline.agent_pipeline import create_agent_pipeline
 from voice_agent.pipeline.nodes import build_initial_node
+from voice_agent.storage.r2_client import R2Storage
 from voice_agent.telephony.call_state import (
     CallStatus,
     get_call,
@@ -410,7 +412,51 @@ async def recording_ready(request: Request) -> dict[str, Any]:
     """Vobiz calls this when the recording file is ready.
 
     Contains RecordUrl, RecordingID, RecordingDuration, CallUUID.
+    We download and upload to R2 asynchronously so Vobiz gets a 200 fast.
     """
     body = await request.form()
-    logger.info(f"Recording ready: {dict(body)}")
+    call_uuid = str(body.get("CallUUID", "unknown"))
+    record_url = str(body.get("RecordUrl", ""))
+
+    logger.info(
+        f"Recording ready: call={call_uuid}, url={record_url[:80] if record_url else 'MISSING'}"
+    )
+
+    if record_url and call_uuid != "unknown":
+        asyncio.create_task(_process_recording(call_uuid, record_url))
+    else:
+        logger.warning("Recording ready: missing CallUUID or RecordUrl")
+
     return {"status": "received"}
+
+
+async def _process_recording(call_uuid: str, record_url: str) -> None:
+    """Download from Vobiz, upload to R2, persist URL to Supabase.
+
+    Runs as a fire-and-forget background task. All errors are logged
+    but never raised, so a failure here cannot crash the webhook.
+    """
+    try:
+        # 1. Download from Vobiz
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(record_url)
+            resp.raise_for_status()
+            audio_bytes = resp.content
+        logger.info(f"Downloaded recording for {call_uuid}: {len(audio_bytes)} bytes")
+
+        # 2. Upload to R2
+        r2 = R2Storage(
+            account_id=settings.r2_account_id,
+            access_key_id=settings.r2_access_key_id,
+            secret_access_key=settings.r2_secret_access_key,
+            bucket_name=settings.r2_bucket_name,
+        )
+        key = await r2.upload_recording(call_uuid, audio_bytes)
+
+        # 3. Persist the R2 key to Supabase
+        supabase = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
+        await supabase.update_call(call_uuid, recording_url=key)
+        logger.info(f"Recording pipeline complete for {call_uuid} → {key}")
+
+    except Exception as e:
+        logger.error(f"Recording pipeline failed for {call_uuid}: {e}")
