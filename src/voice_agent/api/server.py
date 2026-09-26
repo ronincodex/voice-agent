@@ -30,6 +30,7 @@ from voice_agent.config.settings import get_settings
 from voice_agent.db.supabase_client import SupabaseStore
 from voice_agent.pipeline.agent_pipeline import create_agent_pipeline
 from voice_agent.pipeline.nodes import build_initial_node
+from voice_agent.postcall.summarizer import generate_summary
 from voice_agent.storage.r2_client import R2Storage
 from voice_agent.telephony.call_state import (
     CallStatus,
@@ -342,6 +343,49 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     finally:
         _active_websockets.pop(call_id, None)
         logger.info(f"Vobiz stream ended for call {call_id}")
+
+        # Fire-and-forget summary generation from the persisted transcript
+        persisted_call_id = flow_manager.state.get("internal_call_id")
+        if persisted_call_id:
+            asyncio.create_task(
+                _generate_and_persist_summary(call_id, persisted_call_id)
+            )
+
+
+async def _generate_and_persist_summary(
+    call_uuid: str,
+    internal_call_id: str,
+) -> None:
+    """Fetch transcript, generate AI summary, persist to Supabase.
+
+    Runs as a fire-and-forget task. All errors are logged but never raised.
+    """
+    try:
+        supabase = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
+        messages = await supabase.get_transcript(internal_call_id)
+
+        if not messages:
+            logger.warning(f"No transcript for call {call_uuid}, skipping summary")
+            return
+
+        transcript_text = "\n".join(f"{m['role']}: {m['text']}" for m in messages)
+
+        summary = await generate_summary(
+            api_key=settings.sarvam_api_key,
+            transcript=transcript_text,
+        )
+
+        await supabase.update_call(
+            call_uuid,
+            summary=summary,
+            outcome=summary.get("outcome", "other"),
+        )
+        logger.info(
+            f"Summary persisted for {call_uuid}: outcome={summary.get('outcome')}"
+        )
+
+    except Exception as e:
+        logger.error(f"Summary generation failed for {call_uuid}: {e}")
 
 
 @app.post("/hangup")
