@@ -117,9 +117,16 @@ async def incoming_webhook(request: Request) -> HTMLResponse:
 
     vobiz_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-    <Record action="https://{host}/recording-ready" method="POST"
-    recordSession="true" redirect="false" maxLength="3600" playBeep="false"/>
-    <Stream bidirectional="true" keepCallAlive="true"
+    <Record action="https://{host}/recording-ready"
+    callbackUrl="https://{host}/recording-complete"
+    method="POST"
+    callbackMethod="POST"
+    recordSession="true"
+    redirect="false"
+    maxLength="3600"
+    playBeep="false"/>
+    <Stream bidirectional="true"
+    keepCallAlive="true"
     contentType="audio/x-mulaw;rate=8000">
     {ws_url}
     </Stream>
@@ -222,7 +229,9 @@ async def answer_webhook(request: Request) -> HTMLResponse:
     vobiz_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
     <Record action="https://{host}/recording-ready"
+    callbackUrl="https://{host}/recording-complete"
     method="POST"
+    callbackMethod="POST"
     recordSession="true"
     redirect="false"
     maxLength="3600"
@@ -233,7 +242,6 @@ async def answer_webhook(request: Request) -> HTMLResponse:
     {ws_url}
     </Stream>
     </Response>"""
-
     return HTMLResponse(content=vobiz_xml, media_type="application/xml")
 
 
@@ -453,42 +461,87 @@ async def hangup_webhook(request: Request) -> dict[str, Any]:
 
 @app.post("/recording-ready")
 async def recording_ready(request: Request) -> dict[str, Any]:
-    """Vobiz calls this when the recording file is ready.
+    """Vobiz fires this when recording STARTS (premature).
 
-    Contains RecordUrl, RecordingID, RecordingDuration, CallUUID.
-    We download and upload to R2 asynchronously so Vobiz gets a 200 fast.
+    Do not attempt to download here - the file does not exist yet.
+    The /recording-complete callbackUrl fires when the file is ready.
     """
     body = await request.form()
     call_uuid = str(body.get("CallUUID", "unknown"))
-    record_url = str(body.get("RecordUrl", ""))
-
     logger.info(
-        f"Recording ready: call={call_uuid}, url={record_url[:80] if record_url else 'MISSING'}"
+        f"Recording started for {call_uuid} "
+        f"(status={body.get('CallStatus')}, "
+        f"duration={body.get('RecordingDuration')}); awaiting completion"
     )
+    return {"status": "received"}
 
-    if record_url and call_uuid != "unknown":
-        asyncio.create_task(_process_recording(call_uuid, record_url))
+
+@app.post("/recording-complete")
+async def recording_complete(request: Request) -> dict[str, Any]:
+    """Vobiz fires this when the recording MP3 file is ready.
+
+    Uses the Vobiz Recording API to fetch the authenticated download URL,
+    then downloads and uploads to R2.
+    """
+
+    body = await request.form()
+    call_uuid = str(body.get("CallUUID", "unknown"))
+    recording_id = str(body.get("RecordingID", ""))
+
+    logger.info(f"Recording complete: call={call_uuid}, recording_id={recording_id}")
+
+    if recording_id and call_uuid != "unknown":
+        asyncio.create_task(_process_recording_complete(call_uuid, recording_id))
     else:
-        logger.warning("Recording ready: missing CallUUID or RecordUrl")
+        logger.warning("Recording complete: missing CallUUID or RecordingID")
 
     return {"status": "received"}
 
 
-async def _process_recording(call_uuid: str, record_url: str) -> None:
-    """Download from Vobiz, upload to R2, persist URL to Supabase.
-
-    Runs as a fire-and-forget background task. All errors are logged
-    but never raised, so a failure here cannot crash the webhook.
-    """
+async def _process_recording_complete(
+    call_uuid: str,
+    recording_id: str,
+) -> None:
+    """Fetch authenticated recording URL, download, upload to R2, persist."""
     try:
-        # 1. Download from Vobiz
+        # 1. Fetch the real, authenticated recording_url from Vobiz API
+        metadata_url = (
+            f"https://api.vobiz.ai/api/v1/Account/"
+            f"{settings.vobiz_auth_id}/Recording/{recording_id}/"
+        )
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            meta_resp = await client.get(
+                metadata_url,
+                headers={
+                    "X-Auth-ID": settings.vobiz_auth_id,
+                    "X-Auth-Token": settings.vobiz_auth_token,
+                },
+            )
+            meta_resp.raise_for_status()
+            metadata = meta_resp.json()
+
+        real_url = metadata.get("recording_url")
+        if not real_url:
+            logger.error(f"Vobiz API returned no recording_url for {recording_id}")
+            return
+
+        logger.info(f"Vobiz real recording_url: {real_url}")
+
+        # 2. Download the actual MP3 with auth headers
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.get(record_url)
+            resp = await client.get(
+                real_url,
+                headers={
+                    "X-Auth-ID": settings.vobiz_auth_id,
+                    "X-Auth-Token": settings.vobiz_auth_token,
+                },
+            )
             resp.raise_for_status()
             audio_bytes = resp.content
+
         logger.info(f"Downloaded recording for {call_uuid}: {len(audio_bytes)} bytes")
 
-        # 2. Upload to R2
+        # 3. Upload to R2
         r2 = R2Storage(
             account_id=settings.r2_account_id,
             access_key_id=settings.r2_access_key_id,
@@ -497,10 +550,13 @@ async def _process_recording(call_uuid: str, record_url: str) -> None:
         )
         key = await r2.upload_recording(call_uuid, audio_bytes)
 
-        # 3. Persist the R2 key to Supabase
+        # 4. Persist to Supabase
         supabase = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
         await supabase.update_call(call_uuid, recording_url=key)
-        logger.info(f"Recording pipeline complete for {call_uuid} → {key}")
+        logger.info(f"Recording pipeline complete for {call_uuid} -> {key}")
 
     except Exception as e:
-        logger.error(f"Recording pipeline failed for {call_uuid}: {e}")
+        logger.error(
+            f"Recording pipeline failed for {call_uuid} "
+            f"(recording_id={recording_id}): {e}"
+        )
