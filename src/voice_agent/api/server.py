@@ -28,6 +28,11 @@ from pipecat.workers.runner import WorkerRunner
 from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
 from voice_agent.db.supabase_client import SupabaseStore
+from voice_agent.observability.logging_config import (
+    bind_call_context,
+    configure_logging,
+    unbind_call_context,
+)
 from voice_agent.pipeline.agent_pipeline import create_agent_pipeline
 from voice_agent.pipeline.nodes import build_initial_node
 from voice_agent.postcall.summarizer import generate_summary
@@ -40,6 +45,8 @@ from voice_agent.telephony.call_state import (
     remove_call,
 )
 from voice_agent.telephony.client import VobizClient
+
+configure_logging(level="INFO")
 
 settings = get_settings()
 app = FastAPI(title="Voice Agent Telephony API")
@@ -276,6 +283,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     encoding = parsed["encoding"]
     sample_rate = parsed["sample_rate"]
 
+    # Bind call_id to every log line in this coroutine and its children
+    bind_call_context(call_id)
+
     _active_websockets[call_id] = websocket
 
     logger.info(
@@ -358,6 +368,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             asyncio.create_task(
                 _generate_and_persist_summary(call_id, persisted_call_id)
             )
+
+        # Clear context after all dependent tasks have been scheduled
+        unbind_call_context()
 
 
 async def _generate_and_persist_summary(

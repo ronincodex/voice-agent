@@ -47,6 +47,9 @@ async def generate_summary(
         api_key: Sarvam API key.
         transcript: Formatted "role: text" lines for the whole call.
         model: Sarvam model name. Default is the flagship 105b.
+        Uses reasoning_effort=None to disable thinking mode. Structured JSON
+        output doesn not benefit from reasoning traces and they cause the model
+        to return reasoning_content instead of valid JSON.
 
     Returns:
         Parsed dict with keys: outcome, summary, next_action.
@@ -76,6 +79,7 @@ async def generate_summary(
                     }
                 ],
                 "temperature": 0.1,
+                "reasoning_effort": None,  # <-- disables thinking mode
             },
         )
         if response.status_code >= 400:
@@ -85,7 +89,23 @@ async def generate_summary(
         response.raise_for_status()
         payload = response.json()
 
-    content = payload["choices"][0]["message"]["content"].strip()
+    # Only read `content`. If reasoning was disabled, `reasoning_content`
+    # is not populated. Reading it is a bug: reasoning text is never JSON.
+    message = payload["choices"][0].get("message", {})
+    # raw_content = message.get("content") or message.get("reasoning_content") or ""
+    content = str(message.get("content") or "").strip()
+
+    if not content:
+        logger.error(
+            f"Sarvam summary returned empty content. "
+            f"finish_reason={payload['choices'][0].get('finish_reason')!r}, "
+            f"full_message_keys={list(message.keys())}"
+        )
+        return {
+            "outcome": "other",
+            "summary": "Summary unavailable (empty model response).",
+            "next_action": "Review recording manually.",
+        }
 
     # Strip markdown fences if the model added them anyway
     if content.startswith("```"):
