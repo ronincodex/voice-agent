@@ -9,6 +9,8 @@ from typing import Any, cast
 from loguru import logger
 from supabase import Client, create_client
 
+from voice_agent.observability.retry import retry_standard
+
 
 class SupabaseStore:
     """Persist call data to Supabase Postgres."""
@@ -16,6 +18,7 @@ class SupabaseStore:
     def __init__(self, url: str, service_key: str) -> None:
         self._client: Client = create_client(url, service_key)
 
+    @retry_standard
     async def create_call(
         self,
         call_uuid: str,
@@ -43,6 +46,7 @@ class SupabaseStore:
         rows = cast(list[dict[str, Any]], result.data)
         return str(rows[0]["id"])
 
+    @retry_standard
     async def save_message(
         self,
         call_id: str,
@@ -65,11 +69,13 @@ class SupabaseStore:
         ).execute()
         logger.debug(f"Supabase: saved {role} message for call {call_id}")
 
+    @retry_standard
     async def update_call(self, call_uuid: str, **fields: Any) -> None:
         """Update a call record with any subset of fields."""
         self._client.table("calls").update(fields).eq("call_uuid", call_uuid).execute()
         logger.info(f"Supabase: updated {call_uuid} fields={list(fields.keys())}")
 
+    @retry_standard
     async def get_call_by_uuid(self, call_uuid: str) -> dict[str, Any] | None:
         """Fetch a call record by Vobiz call UUID."""
         result = (
@@ -78,6 +84,7 @@ class SupabaseStore:
         rows = cast(list[dict[str, Any]], result.data)
         return rows[0] if rows else None
 
+    @retry_standard
     async def get_transcript(self, call_id: str) -> list[dict[str, Any]]:
         """Fetch all messages for a call, ordered chronologically."""
         result = (

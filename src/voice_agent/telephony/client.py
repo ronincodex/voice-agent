@@ -16,6 +16,7 @@ import httpx
 from loguru import logger
 
 from voice_agent.config.settings import get_settings
+from voice_agent.observability.retry import retry_fast
 
 settings = get_settings()
 
@@ -31,6 +32,7 @@ class VobizClient:
             "Content-Type": "application/json",
         }
 
+    @retry_fast
     async def make_outbound_call(
         self,
         to_number: str,
@@ -79,6 +81,7 @@ class VobizClient:
         logger.info(f"Call initiated. request_uuid: {result.get('request_uuid')}")
         return result
 
+    @retry_fast
     async def hangup_call(self, call_uuid: str) -> dict[str, Any]:
         """Terminate an active call via Vobiz REST API."""
         url = f"{self._base_url}/Account/{settings.vobiz_auth_id}/Call/{call_uuid}/"

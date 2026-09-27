@@ -33,6 +33,7 @@ from voice_agent.observability.logging_config import (
     configure_logging,
     unbind_call_context,
 )
+from voice_agent.observability.retry import retry_standard
 from voice_agent.pipeline.agent_pipeline import create_agent_pipeline
 from voice_agent.pipeline.nodes import build_initial_node
 from voice_agent.postcall.summarizer import generate_summary
@@ -528,6 +529,7 @@ async def recording_complete(request: Request) -> dict[str, Any]:
     return {"status": "received"}
 
 
+@retry_standard
 async def _process_recording_complete(
     call_uuid: str,
     recording_id: str,

@@ -13,6 +13,8 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from loguru import logger
 
+from voice_agent.observability.retry import retry_standard
+
 
 class R2Storage:
     """Upload and retrieve call recordings from Cloudflare R2."""
@@ -34,6 +36,7 @@ class R2Storage:
             region_name="auto",
         )
 
+    @retry_standard
     async def upload_recording(
         self,
         call_uuid: str,
@@ -81,6 +84,7 @@ class R2Storage:
         )
         return url
 
+    @retry_standard
     async def delete_recording(self, key: str) -> None:
         """Delete a recording (used for retention / DPDP compliance)."""
         try:

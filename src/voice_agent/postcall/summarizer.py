@@ -14,6 +14,8 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from voice_agent.observability.retry import retry_standard
+
 SUMMARY_HEADER = """Analyse this call transcript and return ONLY valid JSON
 matching this exact schema:
 
@@ -36,6 +38,7 @@ Transcript:
 SUMMARY_FOOTER = "\n\nReturn ONLY the JSON object. No prose, no markdown."
 
 
+@retry_standard
 async def generate_summary(
     api_key: str,
     transcript: str,
