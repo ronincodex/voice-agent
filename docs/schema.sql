@@ -59,3 +59,7 @@ CREATE POLICY "Service role full access" ON calls
     FOR ALL USING (auth.role() = 'service_role');
 CREATE POLICY "Service role full access" ON messages
     FOR ALL USING (auth.role() = 'service_role');
+
+-- Phase 5.2: latency metrics
+ALTER TABLE calls
+ADD COLUMN IF NOT EXISTS metrics JSONB;

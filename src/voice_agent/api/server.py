@@ -362,6 +362,23 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         _active_websockets.pop(call_id, None)
         logger.info(f"Vobiz stream ended for call {call_id}")
 
+        # Persist latency metrics collected during the call
+        collector = flow_manager.state.get("metrics_collector")
+        if collector is not None:
+            try:
+                summary_metrics = collector.aggregate()
+                if summary_metrics:
+                    supabase = SupabaseStore(
+                        settings.supabase_url, settings.supabase_service_key
+                    )
+                    await supabase.update_call(call_id, metrics=summary_metrics)
+                    logger.info(
+                        f"Metrics persisted for {call_id}: "
+                        f"{list(summary_metrics.keys())}"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to persist metrics for {call_id}: {e}")
+
         # Fire-and-forget summary generation from the persisted transcript
         persisted_call_id = flow_manager.state.get("internal_call_id")
         if persisted_call_id:

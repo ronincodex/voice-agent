@@ -32,6 +32,7 @@ from pipecat.services.sarvam.tts import SarvamTTSService
 from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
 from voice_agent.db.supabase_client import SupabaseStore
+from voice_agent.observability.metrics import MetricsCollector, MetricsObserver
 from voice_agent.pipeline.validators import was_confirmation_question
 from voice_agent.state.redis_store import RedisSessionStore
 
@@ -347,7 +348,10 @@ async def create_agent_pipeline(
         ]
     )
 
-    # ====== 7. Pipeline Task ======
+    # ====== 7b. Latency metrics ======
+    metrics_collector = MetricsCollector()
+    metrics_observer = MetricsObserver(metrics_collector)
+
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
@@ -356,6 +360,7 @@ async def create_agent_pipeline(
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=180,
+        observers=[metrics_observer],  # <-- the fix
     )
 
     # ====== 8. FlowManager ======
@@ -381,5 +386,6 @@ async def create_agent_pipeline(
     # NOTE: internal_call_id is set by server.py AFTER this function returns,
     # because the Supabase call record is created there, not here.
     # flow_manager.state["internal_call_id"] = internal_call_id
+    flow_manager.state["metrics_collector"] = metrics_collector
 
     return task, flow_manager
