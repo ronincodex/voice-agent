@@ -50,6 +50,7 @@ GOODBYE_PATTERNS = re.compile(
     r"not\s+interested|"
     r"stop\s+calling|"
     r"मुझे\s*दिलचस्पी\s*नहीं"
+    r"कॉल\s*(काट|बंद|समाप्त(?:\s*कर)?|खत्म(?:\s*कर)?|ख़त्म(?:\s*कर)?)|"
     r")\b",
     re.IGNORECASE,
 )
@@ -93,7 +94,7 @@ _CONFIRMATION_REGEX = re.compile(
     r"|hang\s+up\s+now"
     r"|call\s+end"  # English words in Hindi word order
     r"|call\s+ko\s+end"  # Hinglish
-    r"|कॉल\s*(?:अभी\s*)?(?:समाप्त|बंद|काट)"
+    r"|कॉल\s*(?:अभी\s*)?(?:समाप्त|बंद|काट|खत्म|ख़त्म)"
     r"|कॉल\s*(?:अभी\s*)?end"
     r"|फोन\s*रख"
     r"|अழைப்பை\s*முடி"
@@ -151,6 +152,31 @@ def is_affirmative_reply(user_text: str) -> bool:
         "ச",  # Tamil 'sari' → சரி
     )
     return any(base in stripped_base for base in _INDIC_AFFIRMATIVE_BASES)
+
+
+# Busy / occupied phrases that, IN THE CONTEXT of a confirmation_pending
+# question, should be treated as an affirmative ("yes, end the call").
+_BUSY_PATTERNS = re.compile(
+    r"\b("
+    r"busy|occupied|engaged|can'?t\s+talk|cannot\s+talk|"
+    r"व्यस्त|बिज़ी|बिजी|बिजी\s*हूँ|व्यस्त\s*हूँ|"
+    r"बात\s*नहीं\s*कर\s*सक(?:ता|ती)|"
+    r"பிஸியாக|பேச\s*முடியாது"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_busy_response(user_text: str) -> bool:
+    """Return True if the caller indicated they are busy / can't talk.
+
+    When the assistant has just asked "would you like me to end the call
+    now?", a response like "I'm busy" is functionally a yes. Treating it
+    as such prevents the guard from blocking the hangup and re-asking.
+    """
+    if not user_text:
+        return False
+    return bool(_BUSY_PATTERNS.search(_norm(user_text)))
 
 
 def is_explicit_goodbye(

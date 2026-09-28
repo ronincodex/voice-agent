@@ -19,6 +19,7 @@ from pipecat.flows import FlowManager, NodeConfig
 from voice_agent.config.languages import LanguageConfig
 from voice_agent.pipeline.validators import (
     is_affirmative_reply,
+    is_busy_response,
     is_explicit_goodbye,
     is_wrong_number,
 )
@@ -36,10 +37,22 @@ def _lang_block(lang_config: LanguageConfig) -> str:
 
 
 def _persona_header(lang_config: LanguageConfig) -> str:
-    """Short persona introduction used in each node's role_message."""
+    """Short persona introduction used in each node's role_message.
+
+    Includes an ABSOLUTE LANGUAGE LOCK: the model must respond only in
+    the configured language, regardless of what the caller speaks, unless
+    the caller explicitly asks to switch. This prevents drift when the
+    caller code-mixes or when a task message contains examples.
+    """
     return (
         f"You are {lang_config.persona_name}, a {lang_config.persona_gender} "
-        f"AI voice assistant for IT-Webhut. You speak {lang_config.name}. "
+        f"AI voice assistant for IT-Webhut.\n\n"
+        f"*** ABSOLUTE LANGUAGE RULE ***\n"
+        f"Speak ONLY in {lang_config.name}. Even if the caller speaks a "
+        f"different language or mixes languages, reply in {lang_config.name}. "
+        f"Do NOT drift into Hindi, English, or any other language unless the "
+        f"caller explicitly asks you to switch. This rule overrides every "
+        f"instruction below.\n\n"
         f"Your responses will be converted to audio — keep them to 1-3 "
         f"natural spoken sentences. No markdown, no bullet points."
     )
@@ -171,10 +184,18 @@ async def hang_up_call(
     # ---- GUARD ----
     if reason == "wrong_number":
         allowed = is_wrong_number(last_user)
-    else:
-        allowed = is_explicit_goodbye(last_user, last_assistant) or (
-            confirmation_pending and is_affirmative_reply(last_user)
+    elif confirmation_pending:
+        # The assistant has already asked "do you want me to end the call?"
+        # Any of these count as a yes: a literal affirmative, a busy/refusal
+        # phrase ( the caller is  explaining why they want to end), or an
+        # explicit goodbye.
+        allowed = (
+            is_affirmative_reply(last_user)
+            or is_busy_response(last_user)
+            or is_explicit_goodbye(last_user, last_assistant)
         )
+    else:
+        allowed = is_explicit_goodbye(last_user, last_assistant)
 
     if not allowed:
         logger.warning("[flows] hang_up_call BLOCKED: arming confirmation_pending")
@@ -188,8 +209,8 @@ async def hang_up_call(
                 "reason": "no_explicit_goodbye",
                 "instruction": (
                     "The caller did NOT explicitly end the call. Ask them "
-                    "directly: 'क्या आप चाहते हैं कि मैं अभी call end कर दूँ?' "
-                    "(or the caller's language equivalent) and WAIT for their reply."
+                    "directly, in the language they are using, whether they "
+                    "want you to end the call now, and WAIT for their reply."
                 ),
             },
             None,
@@ -263,14 +284,19 @@ def _build_qualify_node(
                 "content": (
                     "Discuss the caller's needs related to IT-Webhut's "
                     "services. Keep the conversation moving with short "
-                    "questions. If the caller refuses twice in a row "
-                    '("नहीं धन्यवाद", "not interested", "I\'m busy"), '
-                    "call record_refusal. If the caller explicitly says "
-                    "goodbye or asks to end the call, call hang_up_call "
-                    "with reason='user_requested'. If the caller says this "
-                    "is the wrong number, call handle_wrong_number. If the "
-                    "caller states what they are interested in, call "
-                    "record_interest with a short summary."
+                    "questions. If the caller refuses or says they are "
+                    "busy (e.g. 'नहीं धन्यवाद', 'not interested', "
+                    "'I'm busy', 'व्यस्त हूँ', 'अभी बिज़ी हूँ', "
+                    "'बाद में कॉल करें', 'call me later'), call "
+                    "record_refusal with a short reason. Call the tool "
+                    "on EVERY refusal — the system counts them and "
+                    "decides when to transition. If the caller explicitly "
+                    "says goodbye or asks to end the call, call "
+                    "hang_up_call with reason='user_requested'. If the "
+                    "caller says this is the wrong number, call "
+                    "handle_wrong_number. If the caller states what they "
+                    "are interested in, call record_interest with a "
+                    "short summary."
                 ),
             },
         ],
@@ -296,10 +322,9 @@ def _build_confirm_node(
                 "role": "developer",
                 "content": (
                     "The caller has declined twice or seems to want to end "
-                    "the call. Ask them directly, in their language: "
-                    "'क्या आप चाहते हैं कि मैं अभी call end कर दूँ?' "
-                    "(or 'Would you like me to end the call now?'). "
-                    "Wait for their reply. If they say yes/हाँ/बिल्कुल, "
+                    "the call. Ask them directly, in the language they have "
+                    "been using, whether they want you to end the call now. "
+                    "Wait for their reply. If they say yes in any form, "
                     "call hang_up_call with reason='user_requested'. "
                     "If they say no, do NOT call any tool; continue the "
                     "conversation naturally."
