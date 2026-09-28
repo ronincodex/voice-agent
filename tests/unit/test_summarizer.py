@@ -18,13 +18,19 @@ assistant: बिल्कुल, मैं कल दोबारा call क�
 
 async def main() -> None:
     s = get_settings()
+
+    # Test 1: Sarvam healthy, fallback configured but unused
+    print("--- Test 1: happy path ---")
     result = await generate_summary(
         api_key=s.sarvam_api_key,
         transcript=SAMPLE,
+        groq_api_key=s.groq_api_key,
+        groq_model=s.groq_llm_model,
+        enable_fallback=True,
     )
     print(f"Outcome: {result['outcome']}")
-    print(f"Summary: {result['summary']}")
-    print(f"Next action: {result['next_action']}")
+    print(f"Summary: {result['summary'][:120]}...")
+    # print(f"Next action: {result['next_action']}")
 
     assert result["outcome"] in (
         "interested",

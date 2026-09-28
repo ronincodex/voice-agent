@@ -413,6 +413,9 @@ async def _generate_and_persist_summary(
         summary = await generate_summary(
             api_key=settings.sarvam_api_key,
             transcript=transcript_text,
+            groq_api_key=settings.groq_api_key,
+            groq_model=settings.groq_llm_model,
+            enable_fallback=settings.enable_fallback_summarizer,
         )
 
         await supabase.update_call(

@@ -1,11 +1,10 @@
-"""Post-call summarisation using Sarvam 105b (flagship).
+"""Post-call summarisation with Sarvam primary and Groq fallback.
 
-The flagship model has a 128K context window, Mixture-of-Experts
-architecture (10.3B active parameters per token), and native support
-for Indian languages. Batch operation, so latency is not critical.
+Primary:  Sarvam 105b (flagship, 128K context, native Indic support)
+Fallback: Groq Llama 3.3 70B (OpenAI-compatible, low latency)
 
-Pricing: see https://www.sarvam.ai/pricing
-A typical 3-minute call transcript is ~500 tokens -> fractions of a paisa.
+Fallback is engaged only on transient transport failures. Client errors
+(bad prompt, 4xx) surface immediately without invoking the fallback.
 """
 
 import json
@@ -14,7 +13,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from voice_agent.observability.retry import retry_standard
+from voice_agent.observability.fallback import with_fallback
 
 SUMMARY_HEADER = """Analyse this call transcript and return ONLY valid JSON
 matching this exact schema:
@@ -37,35 +36,38 @@ Transcript:
 
 SUMMARY_FOOTER = "\n\nReturn ONLY the JSON object. No prose, no markdown."
 
+_FALLBACK_RESULT: dict[str, Any] = {
+    "outcome": "other",
+    "summary": "Summary unavailable (all providers failed).",
+    "next_action": "Review recording manually.",
+}
 
-@retry_standard
-async def generate_summary(
-    api_key: str,
-    transcript: str,
-    model: str = "sarvam-105b",
-) -> dict[str, Any]:
-    """Generate a structured summary from a call transcript.
 
-    Args:
-        api_key: Sarvam API key.
-        transcript: Formatted "role: text" lines for the whole call.
-        model: Sarvam model name. Default is the flagship 105b.
-        Uses reasoning_effort=None to disable thinking mode. Structured JSON
-        output doesn not benefit from reasoning traces and they cause the model
-        to return reasoning_content instead of valid JSON.
-
-    Returns:
-        Parsed dict with keys: outcome, summary, next_action.
-        On parse failure, returns a safe fallback dict.
-    """
-    if not transcript.strip():
-        logger.warning("generate_summary: empty transcript")
+def _parse_response(content: str) -> dict[str, Any]:
+    """Parse the JSON body returned by either provider."""
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.strip("`")
+        if content.startswith("json"):
+            content = content[4:].lstrip()
+    try:
+        result: dict[str, Any] = json.loads(content)
+        logger.info(f"Summary generated: outcome={result.get('outcome')!r}")
+        return result
+    except json.JSONDecodeError as e:
+        logger.error(f"Summary JSON parse failed: {e}\nRaw: {content[:200]}")
         return {
             "outcome": "other",
-            "summary": "No transcript available.",
-            "next_action": "Review recording manually.",
+            "summary": content[:500],
+            "next_action": "Manual review required (parser fallback).",
         }
 
+
+async def _summarise_via_sarvam(
+    api_key: str,
+    transcript: str,
+    model: str,
+) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             "https://api.sarvam.ai/v1/chat/completions",
@@ -82,48 +84,81 @@ async def generate_summary(
                     }
                 ],
                 "temperature": 0.1,
-                "reasoning_effort": None,  # <-- disables thinking mode
+                "reasoning_effort": None,
             },
         )
-        if response.status_code >= 400:
-            logger.error(
-                f"Sarvam summary API {response.status_code}: {response.text[:500]}"
-            )
         response.raise_for_status()
         payload = response.json()
 
-    # Only read `content`. If reasoning was disabled, `reasoning_content`
-    # is not populated. Reading it is a bug: reasoning text is never JSON.
     message = payload["choices"][0].get("message", {})
-    # raw_content = message.get("content") or message.get("reasoning_content") or ""
-    content = str(message.get("content") or "").strip()
+    return _parse_response(str(message.get("content") or ""))
 
-    if not content:
-        logger.error(
-            f"Sarvam summary returned empty content. "
-            f"finish_reason={payload['choices'][0].get('finish_reason')!r}, "
-            f"full_message_keys={list(message.keys())}"
+
+async def _summarise_via_groq(
+    api_key: str,
+    transcript: str,
+    model: str,
+) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": SUMMARY_HEADER + transcript + SUMMARY_FOOTER,
+                    }
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            },
         )
+        response.raise_for_status()
+        payload = response.json()
+
+    message = payload["choices"][0].get("message", {})
+    return _parse_response(str(message.get("content") or ""))
+
+
+async def generate_summary(
+    api_key: str,
+    transcript: str,
+    model: str = "sarvam-105b",
+    *,
+    groq_api_key: str | None = None,
+    groq_model: str = "openai/gpt-oss-120b",
+    enable_fallback: bool = True,
+) -> dict[str, Any]:
+    """Generate a structured summary.
+
+    Primary provider: Sarvam. Fallback: Groq. If both fail, returns the
+    safe fallback dict so the call record still persists.
+    """
+    if not transcript.strip():
+        logger.warning("generate_summary: empty transcript")
         return {
             "outcome": "other",
-            "summary": "Summary unavailable (empty model response).",
+            "summary": "No transcript available.",
             "next_action": "Review recording manually.",
         }
 
-    # Strip markdown fences if the model added them anyway
-    if content.startswith("```"):
-        content = content.strip("`")
-        if content.startswith("json"):
-            content = content[4:].lstrip()
+    if not groq_api_key:
+        # No fallback configured. Run Sarvam directly.
+        return await _summarise_via_sarvam(api_key, transcript, model)
 
     try:
-        result: dict[str, Any] = json.loads(content)
-        logger.info(f"Summary generated: outcome={result.get('outcome')!r}")
-        return result
-    except json.JSONDecodeError as e:
-        logger.error(f"Summary JSON parse failed: {e}\nRaw: {content[:200]}")
-        return {
-            "outcome": "other",
-            "summary": content[:500],
-            "next_action": "Manual review required (parser fallback).",
-        }
+        return await with_fallback(
+            primary_name="sarvam-105b",
+            primary=lambda: _summarise_via_sarvam(api_key, transcript, model),
+            fallback_name=f"groq-{groq_model}",
+            fallback=lambda: _summarise_via_groq(groq_api_key, transcript, groq_model),
+            enabled=enable_fallback,
+        )
+    except Exception as e:
+        logger.error(f"Summary generation failed on all providers: {e}")
+        return _FALLBACK_RESULT

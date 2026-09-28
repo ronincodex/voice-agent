@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     sarvam_stt_mode: str = "codemix"
     sarvam_tts_model: str = "bulbul:v3"
 
+    # ====== Fallback Configuration (Phase 5.5) ======
+    # Toggle for Tier 1 batch fallback (summariser).
+    # Set to False to disable fallbck and fail fast on primary errors.
+    enable_fallback_summarizer: bool = True
+
+    # Groq model used as the batch fallback.  Must be an OpenAI-compatible
+    # model available on the Groq API.
+    groq_llm_model: str = "openai/gpt-oss-120b"
+
     # ===== Redis (Upstash) ======
     upstash_redis_rest_url: str = ""
     upstash_redis_rest_token: str = ""
