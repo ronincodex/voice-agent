@@ -17,6 +17,7 @@ from loguru import logger
 from pipecat.flows import FlowManager, NodeConfig
 
 from voice_agent.config.languages import LanguageConfig
+from voice_agent.observability.idempotency import idempotent_tool
 from voice_agent.pipeline.validators import (
     is_affirmative_reply,
     is_busy_response,
@@ -59,6 +60,7 @@ def _persona_header(lang_config: LanguageConfig) -> str:
 
 
 # ====== HANDLER — record_interest ======
+@idempotent_tool(ttl_seconds=60)
 async def record_interest(
     flow_manager: FlowManager,
     interest: str,
@@ -139,6 +141,7 @@ async def handle_wrong_number(
 
 
 # ====== HANDLER — hang_up_call ======
+@idempotent_tool(ttl_seconds=300)
 async def hang_up_call(
     flow_manager: FlowManager,
     reason: str = "user_requested",
@@ -152,22 +155,6 @@ async def hang_up_call(
         logger.error("[flows] session_state missing from flow_manager.state")
         return (
             {"status": "error", "reason": "missing_state"},
-            None,
-        )
-
-    # ----- IDEMPOTENCY: ignore repeat invocations afer confirmation -----
-    # The LLM sometimes calls hang_up_call twice in the same turn: one in
-    # `confirm` (which passesl and transitions to `closing`), then again in
-    # `closing` (where the guard would fail because confirmation_pending was
-    # just reset). Short-circuit here so the second call is a no-op.
-    existing_close_reason = flow_manager.state.get("close_reason")
-    if existing_close_reason:
-        logger.info(
-            f"[flows] hang_up_call already confirmed "
-            f"(close_reason={existing_close_reason!r}), ignoring repeat"
-        )
-        return (
-            {"status": "already_closing", "reason": existing_close_reason},
             None,
         )
 
