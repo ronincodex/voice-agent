@@ -14,7 +14,10 @@ import time
 from typing import Any
 
 from loguru import logger
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.flows import FlowManager
 from pipecat.frames.frames import Frame, TextFrame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -28,6 +31,15 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.sarvam.llm import SarvamLLMService
 from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
+from pipecat.turns.user_start import (
+    TranscriptionUserTurnStartStrategy,
+    VADUserTurnStartStrategy,
+)
+from pipecat.turns.user_stop import (
+    SpeechTimeoutUserTurnStopStrategy,
+    TurnAnalyzerUserTurnStopStrategy,
+)
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
@@ -256,10 +268,40 @@ async def create_agent_pipeline(
 
     # ====== 4. Context & Aggregators (Flows-managed) ======
     context = LLMContext()
+    vad = SileroVADAnalyzer(
+        params=VADParams(
+            confidence=0.6,  # was 0.7: lower threshold accepts weaker signal
+            start_secs=0.15,  # was 0.2: faster speech-onset detection
+            stop_secs=0.2,  # REQUIRED by Smart Turn v3 (training-data value, do not change)
+            min_volume=0.3,  # was 0.6: softer callers now captured
+        )
+    )
+
+    # Turn strategies resolve the asymmetry in PIpecat issue #3643:
+    # a turn can START from a transcription without VAD, but the
+    # TurnAnalyzer stop strategy requires a VAD event. Adding a
+    # transcription-based stop strategy as fallback means short/soft
+    # utterances that VAD misses still finalize their turn.
+    user_turn_strategies = UserTurnStrategies(
+        start=[
+            VADUserTurnStartStrategy(),
+            TranscriptionUserTurnStartStrategy(),
+        ],
+        stop=[
+            TurnAnalyzerUserTurnStopStrategy(
+                turn_analyzer=LocalSmartTurnAnalyzerV3(
+                    params=SmartTurnParams(stop_secs=1.0)  # was default 3.0
+                )
+            ),
+            SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.4),
+        ],
+    )
     context_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
+            vad_analyzer=vad,
+            user_turn_strategies=user_turn_strategies,
+            user_turn_stop_timeout=1.5,  # was 5.0 than changed to 3.0: faster fallback
         ),
     )
 
@@ -355,7 +397,10 @@ async def create_agent_pipeline(
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            audio_out_sample_rate=audio_out_sample_rate,
+            audio_out_sample_rate=audio_out_sample_rate,  # 8000 for Vobiz telephony
+            # audio_in_sample_rate intentionally NOT set here: it must remain 16000
+            # for Smart Turn v3. The VobizFrameSerializer upsamples 8kHz wire audio
+            # to 16kHz internally. See Pipecat issue #3844
             enable_metrics=True,
             enable_usage_metrics=True,
         ),

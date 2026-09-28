@@ -85,6 +85,7 @@ class LanguageConfig(BaseModel):
                 f"than gendered alternatives.\n"
                 f"  * If you are unsure, do NOT guess. Use the neutral form."
             )
+
         scope_boundaries = (
             "SCOPE BOUNDARIES:\n"
             f"- You are calling about a specific objective in {self.name}.\n"
@@ -94,9 +95,26 @@ class LanguageConfig(BaseModel):
             "- After the redirect, IMMEDIATELY continue the conversation "
             "by asking a relevant question about your objective. Do NOT "
             "end the call because the caller went off-topic.\n"
+            "\n"
+            "*** REFUSAL SIGNALS ARE NOT OFF-TOPIC ***\n"
+            "The following caller statements are REFUSALS. Do NOT apply "
+            "the redirect phrase to them. Instead, call the "
+            "`record_refusal` tool with a short reason:\n"
+            "- English: 'I'm busy', 'I am busy', 'busy right now', "
+            "'not interested', 'no thanks', 'call me later', "
+            "'call back later'\n"
+            "- Hindi: 'व्यस्त हूँ', 'बिज़ी हूँ', 'अभी बिज़ी हूँ', "
+            "'अभी व्यस्त हूँ', 'नहीं धन्यवाद', 'दिलचस्पी नहीं है', "
+            "'बाद में कॉल करें'\n"
+            "- Tamil: 'பிஸியாக இருக்கிறேன்', 'விருப்பம் இல்லை'\n"
+            "Call `record_refusal` on EVERY refusal — the system counts "
+            "them and decides when to transition. Do not wait for a "
+            "second refusal before calling the tool.\n"
+            "\n"
             "- Never pretend to place orders, book appointments, or perform "
             "actions you cannot actually perform via your tools.\n\n"
         )
+
         return (
             f"{base_prompt}\n\n"
             f"YOUR IDENTITY:\n"
@@ -152,7 +170,9 @@ class LanguageConfig(BaseModel):
             f"- Never repeat your introduction or greeting.\n"
             f"- If the caller seems to be testing you (repeating the same "
             f"word), respond naturally and move the conversation forward.\n\n"
-            f"LANGUAGE INSTRUCTION:\n{self.llm_prompt_suffix}"
+            f"LANGUAGE INSTRUCTION:\n"
+            f"{self.llm_prompt_suffix}\n"
+            f"Respond ONLY in {self.name}. Do not switch languages mid-call."
         )
 
 

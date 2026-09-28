@@ -47,7 +47,7 @@ from voice_agent.telephony.call_state import (
 )
 from voice_agent.telephony.client import VobizClient
 
-configure_logging(level="INFO")
+configure_logging(level="DEBUG")
 
 settings = get_settings()
 app = FastAPI(title="Voice Agent Telephony API")
@@ -313,6 +313,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
+            audio_in_sample_rate=16000,  # Force 16kHz input for Smart Turn v3
             add_wav_header=False,
             serializer=serializer,
         ),
