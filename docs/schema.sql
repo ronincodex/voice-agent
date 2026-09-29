@@ -63,3 +63,20 @@ CREATE POLICY "Service role full access" ON messages
 -- Phase 5.2: latency metrics
 ALTER TABLE calls
 ADD COLUMN IF NOT EXISTS metrics JSONB;
+
+-- Phase 5.7.1: Compliance audit trail
+CREATE TABLE IF NOT EXISTS call_audit (
+    id BIGSERIAL PRIMARY KEY,
+    call_uuid TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_data JSONB,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_audit_call_uuid
+    ON call_audit(call_uuid, created_at);
+
+ALTER TABLE call_audit ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Service role full access" ON call_audit
+    FOR ALL USING (auth.role() = 'service_role');
