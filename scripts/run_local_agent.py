@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import os
 import sys
+from typing import Any
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -20,7 +21,13 @@ load_dotenv()
 from pipecat.transports.daily.transport import DailyParams, DailyTransport  # noqa: E402
 from pipecat.workers.runner import WorkerRunner  # noqa: E402
 
+from voice_agent.config.languages import get_language_config  # noqa: E402
 from voice_agent.pipeline.agent_pipeline import create_agent_pipeline  # noqa: E402
+from voice_agent.pipeline.nodes import build_initial_node  # noqa: E402
+
+# Strong references to fire-and-forget tasks. Without this, asyncio may
+# garbage-collect the task before it runs (the classic asyncio footgun).
+_background_tasks: set[asyncio.Task[Any]] = set()
 
 
 async def main() -> None:
@@ -56,10 +63,25 @@ async def main() -> None:
         ),
     )
 
-    task = await create_agent_pipeline(
+    task, flow_manager = await create_agent_pipeline(
         transport=transport,
         language_code=args.language,
     )
+
+    lang_config = get_language_config(args.language)
+
+    async def _start_flow() -> None:
+        """Initialize the Flows graph after the pipeline is ready."""
+        await asyncio.sleep(2.0)
+        try:
+            await flow_manager.initialize(build_initial_node(lang_config))
+            logger.info("Flow initialized")
+        except Exception as e:
+            logger.error(f"Flow initialization failed: {e}")
+
+    flow_start_task = asyncio.create_task(_start_flow())
+    _background_tasks.add(flow_start_task)
+    flow_start_task.add_done_callback(_background_tasks.discard)
 
     logger.info("Pipeline created. Starting conversation...")
     runner = WorkerRunner()
