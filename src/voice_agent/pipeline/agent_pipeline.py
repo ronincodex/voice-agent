@@ -43,6 +43,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
+from voice_agent.db.audit import AuditTrail
 from voice_agent.db.supabase_client import SupabaseStore
 from voice_agent.observability.metrics import MetricsCollector, MetricsObserver
 from voice_agent.pipeline.validators import was_confirmation_question
@@ -432,5 +433,12 @@ async def create_agent_pipeline(
     # because the Supabase call record is created there, not here.
     # flow_manager.state["internal_call_id"] = internal_call_id
     flow_manager.state["metrics_collector"] = metrics_collector
+    audit_trail = AuditTrail(
+        supabase_url=settings.supabase_url,
+        service_key=settings.supabase_service_key,
+    )
+    flow_manager.state["audit"] = audit_trail
+    flow_manager.state["supabase_url"] = settings.supabase_url
+    flow_manager.state["supabase_key"] = settings.supabase_service_key
 
     return task, flow_manager

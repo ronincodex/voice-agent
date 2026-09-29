@@ -113,6 +113,55 @@ async def record_refusal(
     )
 
 
+@idempotent_tool(ttl_seconds=300)
+async def record_consent(
+    flow_manager: FlowManager,
+    accepted: bool,
+) -> tuple[dict[str, Any], NodeConfig | None]:
+    """Record the caller's response to the AI-and-recording disclosure.
+
+    Args:
+        accepted: True if the caller agreed to proceed, False if they
+            declined. Required.
+
+    Returns:
+        On acceptance, transitions to the qualify node. On decline,
+        transitions to the closing node with the consent_decline_ack.
+    """
+    from datetime import UTC, datetime
+
+    call_id = flow_manager.state.get("call_id", "unknown")
+    audit = flow_manager.state.get("audit")
+    supabase_store = flow_manager.state.get("supabase")
+
+    if accepted:
+        if audit is not None:
+            await audit.record(call_id, "consent_captured", {"version": "v1"})
+        if supabase_store is not None:
+            try:
+                await supabase_store.update_call(
+                    call_id,
+                    consent_captured_at=datetime.now(UTC).isoformat(),
+                    disclosure_version="v1",
+                )
+            except Exception as e:
+                logger.error(f"Failed to persist consent timestamp: {e}")
+        logger.info(f"[flows] consent captured for {call_id}")
+        return (
+            {"status": "consent_granted"},
+            _build_qualify_node(flow_manager),
+        )
+
+    if audit is not None:
+        await audit.record(call_id, "consent_declined", {"version": "v1"})
+    logger.info(f"[flows] consent declined for {call_id}")
+    flow_manager.state["close_reason"] = "consent_declined"
+    return (
+        {"status": "consent_declined"},
+        _build_closing_node(flow_manager),
+    )
+
+
 # ====== HANDLER — handle_wrong_number ======
 async def handle_wrong_number(
     flow_manager: FlowManager,
@@ -221,7 +270,7 @@ async def hang_up_call(
 
 # ====== NODE BUILDERS ======
 def _build_greeting_node(lang_config: LanguageConfig) -> NodeConfig:
-    """Opening node — speak the greeting and wait for the caller."""
+    """Opening node: speak the greeting and wait for the caller."""
     return NodeConfig(
         name="greeting",
         role_message=_persona_header(lang_config),
@@ -239,18 +288,18 @@ def _build_greeting_node(lang_config: LanguageConfig) -> NodeConfig:
         post_actions=[
             {
                 "type": "function",
-                "handler": _transition_to_qualify,
+                "handler": _transition_to_consent,
             }
         ],
     )
 
 
-async def _transition_to_qualify(
+async def _transition_to_consent(
     action: dict[str, Any], flow_manager: FlowManager
 ) -> None:
-    """Post-action on greeting node — move to qualify after greeting plays."""
+    """Post-action on greeting: move to consent after greeting plays."""
     lang_config: LanguageConfig = flow_manager.state["lang_config"]
-    await flow_manager.set_node_from_config(_build_qualify_node(lang_config))
+    await flow_manager.set_node_from_config(_build_consent_node(lang_config))
 
 
 def _build_qualify_node(
@@ -289,6 +338,30 @@ def _build_qualify_node(
         ],
         functions=[record_interest, record_refusal, handle_wrong_number, hang_up_call],
         respond_immediately=False,
+    )
+
+
+def _build_consent_node(lang_config: LanguageConfig) -> NodeConfig:
+    """Consent node: play DPDP disclosure and wait for caller reply."""
+    return NodeConfig(
+        name="consent",
+        role_message=_persona_header(lang_config),
+        task_messages=[
+            {
+                "role": "developer",
+                "content": (
+                    f"Say exactly this disclosure, then stop and wait for "
+                    f"the caller's reply: {lang_config.consent_disclosure}\n\n"
+                    f"If the caller says yes, हाँ, or ஆம் in any form, call "
+                    f"record_consent with accepted=True. If the caller says "
+                    f"no, नहीं, or இல்லை in any form, call record_consent "
+                    f"with accepted=False. Do not proceed until you have a "
+                    f"clear yes or no."
+                ),
+            },
+        ],
+        functions=[record_consent],
+        respond_immediately=True,
     )
 
 
@@ -336,11 +409,12 @@ def _build_closing_node(
         lang_config = flow_manager_or_config
         close_reason = "user_requested"
 
-    farewell = (
-        lang_config.farewell_wrong_number
-        if close_reason == "wrong_number"
-        else lang_config.farewell
-    )
+    if close_reason == "wrong_number":
+        farewell = lang_config.farewell_wrong_number
+    elif close_reason == "consent_declined":
+        farewell = lang_config.consent_decline_ack
+    else:
+        farewell = lang_config.farewell
 
     return NodeConfig(
         name="closing",

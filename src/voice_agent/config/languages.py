@@ -27,6 +27,8 @@ class LanguageConfig(BaseModel):
     scope_redirect: str  # Language-specific scope boundary message
     farewell: str  # Said immediately before ending the call.
     farewell_wrong_number: str  # Said when ending due to wrong number.
+    consent_disclosure: str  # DPDP disclosure played at call opening.
+    consent_decline_ack: str  # Farewell when the caller declines consent.
 
     def get_greeting(self) -> str:
         """Return the greeting with the persona name substituted in.
@@ -195,6 +197,11 @@ LANGUAGES: dict[str, LanguageConfig] = {
         # Hindi
         farewell="धन्यवाद! आपका दिन शुभ हो।",
         farewell_wrong_number="क्षमा करें, गलत नंबर के लिए धन्यवाद।",
+        consent_disclosure=(
+            "यह कॉल AI सहायक द्वारा संचालित है और गुणवत्ता तथा सेवा "
+            "उद्देश्यों के लिए रिकॉर्ड की जा सकती है। क्या आप जारी रखना चाहेंगे?"
+        ),
+        consent_decline_ack="समझ गई। आपका दिन शुभ हो।",
     ),
     "en-IN": LanguageConfig(
         code="en-IN",
@@ -214,6 +221,11 @@ LANGUAGES: dict[str, LanguageConfig] = {
         # English
         farewell="Thank you! Have a great day.",
         farewell_wrong_number="Sorry for the wrong number. Thank you.",
+        consent_disclosure=(
+            "This call is handled by an AI assistant and may be recorded "
+            "for quality and service purposes. Would you like to continue?"
+        ),
+        consent_decline_ack="Understood. Have a great day.",
     ),
     "ta-IN": LanguageConfig(
         code="ta-IN",
@@ -234,6 +246,11 @@ LANGUAGES: dict[str, LanguageConfig] = {
         # Tamil
         farewell="நன்றி! உங்கள் நாள் நன்றாக இருக்கட்டும்.",
         farewell_wrong_number="தவறான எண்ணுக்கு மன்னிக்கவும். நன்றி.",
+        consent_disclosure=(
+            "இந்த அழைப்பு ஒரு AI உதவியாளரால் நடத்தப்படுகிறது, தரம் மற்றும் "
+            "சேவை நோக்கங்களுக்காக பதிவு செய்யப்படலாம். தொடர விரும்புகிறீர்களா?"
+        ),
+        consent_decline_ack="புரிந்தது. உங்கள் நாள் நன்றாக இருக்கட்டும்.",
     ),
 }
 

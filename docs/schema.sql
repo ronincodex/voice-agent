@@ -80,3 +80,10 @@ ALTER TABLE call_audit ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "Service role full access" ON call_audit
     FOR ALL USING (auth.role() = 'service_role');
+
+-- Phase 5.7.2: DPDP consent capture
+ALTER TABLE calls
+ADD COLUMN IF NOT EXISTS consent_captured_at TIMESTAMPTZ;
+
+ALTER TABLE calls
+ADD COLUMN IF NOT EXISTS disclosure_version TEXT;
