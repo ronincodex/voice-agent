@@ -468,6 +468,23 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             except Exception as e:
                 logger.error(f"Failed to persist metrics for {call_id}: {e}")
 
+        # Phase 5.7.5: persist prompt injection guard count if any
+        guard = flow_manager.state.get("prompt_injection_guard")
+        if guard is not None and guard.flagged_count > 0:
+            try:
+                audit = AuditTrail(settings.supabase_url, settings.supabase_service_key)
+                await audit.record(
+                    call_id,
+                    "guardrail_prompt_injection",
+                    {"count": guard.flagged_count},
+                )
+                logger.info(
+                    f"Prompt injection blocked {guard.flagged_count}x "
+                    f"for call {call_id}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to record guardrail audit for {call_id}: {e}")
+
         # Fire-and-forget summary generation from the persisted transcript
         persisted_call_id = flow_manager.state.get("internal_call_id")
         if persisted_call_id:

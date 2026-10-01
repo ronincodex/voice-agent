@@ -46,6 +46,7 @@ from voice_agent.config.settings import get_settings
 from voice_agent.db.audit import AuditTrail
 from voice_agent.db.supabase_client import SupabaseStore
 from voice_agent.observability.metrics import MetricsCollector, MetricsObserver
+from voice_agent.pipeline.guardrail import PromptInjectionGuard
 from voice_agent.pipeline.validators import was_confirmation_question
 from voice_agent.state.redis_store import RedisSessionStore
 
@@ -376,11 +377,14 @@ async def create_agent_pipeline(
             logger.error(f"[user-turn] failed to persist: {e}")
 
     # ====== 6. Pipeline ======
+    guard = PromptInjectionGuard(lang_config.guardrail_deflect)
+
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
             TranscriptionDeduplicator(),
+            guard,
             UtteranceTracker(session_state),
             context_aggregator.user(),
             llm,
@@ -440,5 +444,6 @@ async def create_agent_pipeline(
     flow_manager.state["audit"] = audit_trail
     flow_manager.state["supabase_url"] = settings.supabase_url
     flow_manager.state["supabase_key"] = settings.supabase_service_key
+    flow_manager.state["prompt_injection_guard"] = guard
 
     return task, flow_manager

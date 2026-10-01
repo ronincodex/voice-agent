@@ -29,6 +29,7 @@ class LanguageConfig(BaseModel):
     farewell_wrong_number: str  # Said when ending due to wrong number.
     consent_disclosure: str  # DPDP disclosure played at call opening.
     consent_decline_ack: str  # Farewell when the caller declines consent.
+    guardrail_deflect: str
 
     def get_greeting(self) -> str:
         """Return the greeting with the persona name substituted in.
@@ -202,6 +203,9 @@ LANGUAGES: dict[str, LanguageConfig] = {
             "उद्देश्यों के लिए रिकॉर्ड की जा सकती है। क्या आप जारी रखना चाहेंगे?"
         ),
         consent_decline_ack="समझ गई। आपका दिन शुभ हो।",
+        guardrail_deflect=(
+            "मैं इसमें सहायता नहीं कर सकती। क्या हम अपनी बात पर वापस आ सकते हैं?"
+        ),
     ),
     "en-IN": LanguageConfig(
         code="en-IN",
@@ -226,6 +230,9 @@ LANGUAGES: dict[str, LanguageConfig] = {
             "for quality and service purposes. Would you like to continue?"
         ),
         consent_decline_ack="Understood. Have a great day.",
+        guardrail_deflect=(
+            "I'm not able to help with that. Can we return to our conversation?"
+        ),
     ),
     "ta-IN": LanguageConfig(
         code="ta-IN",
@@ -251,6 +258,7 @@ LANGUAGES: dict[str, LanguageConfig] = {
             "சேவை நோக்கங்களுக்காக பதிவு செய்யப்படலாம். தொடர விரும்புகிறீர்களா?"
         ),
         consent_decline_ack="புரிந்தது. உங்கள் நாள் நன்றாக இருக்கட்டும்.",
+        guardrail_deflect=("இதில் என்னால் உதவ முடியாது. நமது உரையாடலுக்குத் திரும்பலாமா?"),
     ),
 }
 
