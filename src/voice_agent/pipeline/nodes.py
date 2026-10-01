@@ -189,6 +189,46 @@ async def handle_wrong_number(
     )
 
 
+@idempotent_tool(ttl_seconds=300)
+async def request_opt_out(
+    flow_manager: FlowManager,
+    reason: str = "caller_requested",
+) -> tuple[dict[str, Any], NodeConfig | None]:
+    """Record a caller's request to never be contacted again.
+
+    Args:
+        reason: Short description of what the caller said (e.g.,
+            'told us to stop calling'). Required.
+
+    Returns:
+        Transitions to the closing node with close_reason='opt_out'.
+    """
+    call_id = flow_manager.state.get("call_id", "unknown")
+    to_number = flow_manager.state.get("to_number", "")
+    audit = flow_manager.state.get("audit")
+    supabase_store = flow_manager.state.get("supabase")
+
+    if supabase_store is not None and to_number:
+        try:
+            await supabase_store.add_opt_out(to_number, reason, call_id)
+        except Exception as e:
+            logger.error(f"Failed to record opt-out for {to_number}: {e}")
+
+    if audit is not None:
+        await audit.record(
+            call_id,
+            "opt_out_requested",
+            {"reason": reason, "to_number": to_number},
+        )
+
+    logger.info(f"[flows] opt-out recorded for {call_id} ({to_number})")
+    flow_manager.state["close_reason"] = "opt_out"
+    return (
+        {"status": "opt_out_recorded"},
+        _build_closing_node(flow_manager),
+    )
+
+
 # ====== HANDLER — hang_up_call ======
 @idempotent_tool(ttl_seconds=300)
 async def hang_up_call(
@@ -333,10 +373,20 @@ def _build_qualify_node(
                     "handle_wrong_number. If the caller states what they "
                     "are interested in, call record_interest with a "
                     "short summary."
+                    "If the caller explicitly asks to never be contacted again "
+                    "('don't call me again', 'stop calling', 'never call this number', "
+                    "'मुझे दोबारा कॉल मत करें', 'இனி அழைக்க வேண்டாம்'), call request_opt_out "
+                    "instead of record_refusal, this is stronger than a refusal."
                 ),
             },
         ],
-        functions=[record_interest, record_refusal, handle_wrong_number, hang_up_call],
+        functions=[
+            record_interest,
+            record_refusal,
+            handle_wrong_number,
+            hang_up_call,
+            request_opt_out,  # <-- new
+        ],
         respond_immediately=False,
     )
 

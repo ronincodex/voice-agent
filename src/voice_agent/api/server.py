@@ -12,7 +12,9 @@ Exposes:
 
 import asyncio
 from datetime import UTC, datetime
+from html import escape as xml_escape
 from typing import Any, cast
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket
@@ -25,8 +27,13 @@ from pipecat.transports.websocket.fastapi import (
 )
 from pipecat.workers.runner import WorkerRunner
 
+from voice_agent.compliance.calling_window import (
+    current_ist_time,
+    is_within_calling_window,
+)
 from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
+from voice_agent.db.audit import AuditTrail
 from voice_agent.db.supabase_client import SupabaseStore
 from voice_agent.observability.logging_config import (
     bind_call_context,
@@ -50,11 +57,39 @@ from voice_agent.telephony.client import VobizClient
 configure_logging(level="DEBUG")
 
 settings = get_settings()
+
+if settings.bypass_calling_hours:
+    logger.warning(
+        "BYPASS_CALLING_HOURS=true: TRAI calling-hour enforcement is DISABLED. "
+        "This must be false in production."
+    )
 app = FastAPI(title="Voice Agent Telephony API")
+
 vobiz_client = VobizClient()
 
 # Maps call_id -> WebSocket for graceful shutdown when the call ends
 _active_websockets: dict[str, WebSocket] = {}
+
+
+def _normalize_phone(number: str) -> str:
+    """Return the number in E.164 form with a leading +.
+
+    Vobiz webhooks strip the '+' from caller IDs. Normalize at every
+    boundary so the opt-out table, audit trail, and outbound API calls
+    all see the same canonical form.
+    """
+    digits = number.strip().replace(" ", "").replace("-", "")
+    if not digits:
+        return ""
+    if digits.startswith("+"):
+        return digits
+    # India: bare 10-digit mobile
+    if len(digits) == 10 and digits[0] in "6789":
+        return f"+91{digits}"
+    # India with 91 prefix
+    if digits.startswith("91") and len(digits) == 12:
+        return f"+{digits}"
+    return f"+{digits}"
 
 
 @app.on_event("startup")
@@ -116,12 +151,16 @@ async def incoming_webhook(request: Request) -> HTMLResponse:
     """
     form = await request.form()
     from_number = str(form.get("From", "unknown"))
-    to_number = str(form.get("To", "unknown"))
+    to_number = _normalize_phone(str(form.get("To", "")))
 
     language = resolve_language_for_inbound(to_number)
 
     host = request.headers.get("host", "")
-    ws_url = f"wss://{host}/ws?language={language}&direction=inbound"
+    ws_url = f"wss://{host}/ws?language={language}&to={quote(to_number, safe='')}"
+    # XML text content requires & to be escaped as &amp;. Vobiz's
+    # parser rejects the VobizXML otherwise (HangupCause: Invalid
+    # Answer XML).
+    ws_url_xml = xml_escape(ws_url)
 
     vobiz_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
@@ -136,10 +175,9 @@ async def incoming_webhook(request: Request) -> HTMLResponse:
     <Stream bidirectional="true"
     keepCallAlive="true"
     contentType="audio/x-mulaw;rate=8000">
-    {ws_url}
+    {ws_url_xml}
     </Stream>
     </Response>"""
-
     logger.info(
         f"Inbound call: from={from_number}, to={to_number}, language={language}"
     )
@@ -173,7 +211,7 @@ async def trigger_call(request: Request) -> dict[str, Any]:
         }
     """
     body = await request.json()
-    to_number = body.get("to")
+    to_number = _normalize_phone(str(body.get("to", "")))
     language = body.get("language", "hi-IN")
     answer_url = body.get("answer_url")
     hangup_url = body.get("hangup_url")
@@ -196,6 +234,51 @@ async def trigger_call(request: Request) -> dict[str, Any]:
                 status_code=400,
                 detail=f"'{field_name}' contains a placeholder URL: {field_value}",
             )
+
+    # ---- Phase 5.7.3: TRAI calling-hour gate ----
+    now = datetime.now(UTC)
+    if not settings.bypass_calling_hours and not is_within_calling_window(now):
+        ist_time = current_ist_time(now)
+        logger.warning(
+            f"Call to {to_number} blocked: outside 9 AM - 8:45 PM IST "
+            f"(IST now {ist_time})"
+        )
+        try:
+            audit = AuditTrail(settings.supabase_url, settings.supabase_service_key)
+            await audit.record(
+                to_number,
+                "calling_hours_blocked",
+                {"ist_time": ist_time, "attempted_to": to_number},
+            )
+        except Exception as e:
+            logger.error(f"Failed to audit calling-hour block: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Outside TRAI calling window (9 AM - 9 PM IST). IST now: {ist_time}"
+            ),
+        )
+
+    # ---- Phase 5.7.3: local opt-out gate ----
+    supabase_gate = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
+    if await supabase_gate.check_opt_out(to_number):
+        logger.warning(f"Call to {to_number} blocked: on local opt-out list")
+        try:
+            audit = AuditTrail(settings.supabase_url, settings.supabase_service_key)
+            await audit.record(
+                to_number,
+                "dnd_blocked",
+                {"source": "local_optout", "attempted_to": to_number},
+            )
+        except Exception as e:
+            logger.error(f"Failed to audit opt-out block: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This number has requested no further contact. "
+                "Call blocked per TRAI TCCCPR."
+            ),
+        )
 
     answer_with_lang = f"{answer_url}?language={language}"
 
@@ -232,7 +315,13 @@ async def answer_webhook(request: Request) -> HTMLResponse:
         state.mark_answered()
 
     host = request.headers.get("host", "")
-    ws_url = f"wss://{host}/ws?language={language}"
+    to_number = str(form.get("To", ""))
+    ws_url = f"wss://{host}/ws?language={language}&to={to_number}"
+
+    host = request.headers.get("host", "")
+    to_number = _normalize_phone(str(form.get("To", "")))
+    ws_url = f"wss://{host}/ws?language={language}&to={quote(to_number, safe='')}"
+    ws_url_xml = xml_escape(ws_url)
 
     vobiz_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
@@ -247,7 +336,7 @@ async def answer_webhook(request: Request) -> HTMLResponse:
     <Stream bidirectional="true"
     keepCallAlive="true"
     contentType="audio/x-mulaw;rate=8000">
-    {ws_url}
+    {ws_url_xml}
     </Stream>
     </Response>"""
     return HTMLResponse(content=vobiz_xml, media_type="application/xml")
@@ -262,6 +351,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     language = websocket.query_params.get("language", "hi-IN")
     direction = websocket.query_params.get("direction", "outbound")
+    to_number = websocket.query_params.get("to", "")
     logger.info(f"WebSocket connected: language={language}, direction={direction}")
 
     # Parse the Vobiz `start` event. parse_vobiz_start() returns a DICT.
@@ -325,6 +415,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         audio_out_sample_rate=8000,
         call_id=call_id,
     )
+    flow_manager.state["to_number"] = to_number
 
     # Register the call in Supabase and store the internal UUID
     try:

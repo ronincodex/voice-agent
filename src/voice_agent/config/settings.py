@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     r2_secret_access_key: str = ""
     r2_bucket_name: str = "voice-recordings"
 
+    # ====== TRAI Calling-Hour Enforcement (Phase 5.7.3) ======
+    # When True, the 9 AM - 8:45 PM IST gate is skipped.
+    # Must be False in production.
+    bypass_calling_hours: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

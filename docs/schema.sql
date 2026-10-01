@@ -87,3 +87,16 @@ ADD COLUMN IF NOT EXISTS consent_captured_at TIMESTAMPTZ;
 
 ALTER TABLE calls
 ADD COLUMN IF NOT EXISTS disclosure_version TEXT;
+
+-- Phase 5.7.3: DND out-put list.
+CREATE TABLE IF NOT EXISTS dnd_optouts (
+    phone_number TEXT PRIMARY KEY,
+    reason TEXT,
+    source_call_uuid TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+ALTER TABLE dnd_optouts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Service role full access" ON dnd_optouts
+    FOR ALL USING (auth.role() = 'service_role');

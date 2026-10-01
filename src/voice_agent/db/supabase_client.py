@@ -12,6 +12,20 @@ from supabase import Client, create_client
 from voice_agent.observability.retry import retry_standard
 
 
+def _normalize_phone(number: str) -> str:
+    """E.164 normalization matching server._normalize_phone."""
+    digits = number.strip().replace(" ", "").replace("-", "")
+    if not digits:
+        return ""
+    if digits.startswith("+"):
+        return digits
+    if len(digits) == 10 and digits[0] in "6789":
+        return f"+91{digits}"
+    if digits.startswith("91") and len(digits) == 12:
+        return f"+{digits}"
+    return f"+{digits}"
+
+
 class SupabaseStore:
     """Persist call data to Supabase Postgres."""
 
@@ -95,3 +109,35 @@ class SupabaseStore:
             .execute()
         )
         return cast(list[dict[str, Any]], result.data)
+
+    @retry_standard
+    async def check_opt_out(self, phone_number: str) -> bool:
+        """Return True if the number is on the local opt-out list."""
+        normalized = _normalize_phone(phone_number)
+        result = (
+            self._client.table("dnd_optouts")
+            .select("phone_number")
+            .eq("phone_number", normalized)
+            .limit(1)
+            .execute()
+        )
+        rows = cast(list[dict[str, Any]], result.data)
+        return len(rows) > 0
+
+    @retry_standard
+    async def add_opt_out(
+        self,
+        phone_number: str,
+        reason: str,
+        source_call_uuid: str,
+    ) -> None:
+        """Add or refresh a number in the local opt-out list (idempotent)."""
+        normalized = _normalize_phone(phone_number)
+        self._client.table("dnd_optouts").upsert(
+            {
+                "phone_number": normalized,
+                "reason": reason,
+                "source_call_uuid": source_call_uuid,
+            }
+        ).execute()
+        logger.info(f"Supabase: opt-out recorded for {normalized}")
