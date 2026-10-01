@@ -100,3 +100,28 @@ ALTER TABLE dnd_optouts ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "Service role full access" ON dnd_optouts
     FOR ALL USING (auth.role() = 'service_role');
+
+
+-- Phase 5.7.4: Atomic transcript replacement
+CREATE OR REPLACE FUNCTION public.replace_call_messages(
+    p_call_id UUID,
+    p_messages JSONB
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    DELETE FROM public.messages WHERE call_id = p_call_id;
+    INSERT INTO public.messages (call_id, role, text)
+    SELECT
+        p_call_id,
+        (elem->>'role')::text,
+        (elem->>'text')::text
+    FROM jsonb_array_elements(p_messages) AS elem;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.replace_call_messages(uuid, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.replace_call_messages(uuid, jsonb) TO service_role;

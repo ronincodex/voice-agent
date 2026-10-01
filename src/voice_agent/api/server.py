@@ -31,6 +31,7 @@ from voice_agent.compliance.calling_window import (
     current_ist_time,
     is_within_calling_window,
 )
+from voice_agent.compliance.pii import detect_and_mask
 from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
 from voice_agent.db.audit import AuditTrail
@@ -313,11 +314,6 @@ async def answer_webhook(request: Request) -> HTMLResponse:
     state = get_call(call_uuid)
     if state:
         state.mark_answered()
-
-    host = request.headers.get("host", "")
-    to_number = str(form.get("To", ""))
-    ws_url = f"wss://{host}/ws?language={language}&to={to_number}"
-
     host = request.headers.get("host", "")
     to_number = _normalize_phone(str(form.get("To", "")))
     ws_url = f"wss://{host}/ws?language={language}&to={quote(to_number, safe='')}"
@@ -499,7 +495,48 @@ async def _generate_and_persist_summary(
             logger.warning(f"No transcript for call {call_uuid}, skipping summary")
             return
 
-        transcript_text = "\n".join(f"{m['role']}: {m['text']}" for m in messages)
+        # ---- Phase 5.7.4: PII masking ----
+        # Concatenate adjacent same-role messages with a space before
+        # running detection. STT splits long utterances across multiple
+        # frames (e.g. a phone number split into "98765" + "43210"), so
+        # per-message detection misses PII that spans the boundary.
+        # Detection runs on the joined text; the masked result is stored
+        # as a single consolidated message per role.
+        user_concat = " ".join(m["text"] for m in messages if m["role"] == "user")
+        assistant_concat = " ".join(
+            m["text"] for m in messages if m["role"] == "assistant"
+        )
+
+        masked_user, user_counts = detect_and_mask(user_concat)
+        masked_assistant, assistant_counts = detect_and_mask(assistant_concat)
+
+        mask_counts: dict[str, int] = {
+            k: user_counts.get(k, 0) + assistant_counts.get(k, 0)
+            for k in {**user_counts, **assistant_counts}
+        }
+
+        if mask_counts:
+            # Replace the per-utterance transcript with one masked row per
+            # role. Atomic: the Postgres function deletes and inserts in
+            # a single transaction, so a partial failure cannot leave the
+            # call without a transcript. Plaintext never persists.
+            rows: list[dict[str, str]] = []
+            if masked_user:
+                rows.append({"role": "user", "text": masked_user})
+            if masked_assistant:
+                rows.append({"role": "assistant", "text": masked_assistant})
+
+            supabase._client.rpc(
+                "replace_call_messages",
+                {"p_call_id": internal_call_id, "p_messages": rows},
+            ).execute()
+
+            audit = AuditTrail(settings.supabase_url, settings.supabase_service_key)
+            await audit.record(call_uuid, "pii_masked", {"counts": mask_counts})
+            logger.info(f"PII masked for {call_uuid}: {mask_counts}")
+
+        # The summary sees the fully masked transcript.
+        transcript_text = f"user: {masked_user}\nassistant: {masked_assistant}"
 
         summary = await generate_summary(
             api_key=settings.sarvam_api_key,
@@ -517,7 +554,6 @@ async def _generate_and_persist_summary(
         logger.info(
             f"Summary persisted for {call_uuid}: outcome={summary.get('outcome')}"
         )
-
     except Exception as e:
         logger.error(f"Summary generation failed for {call_uuid}: {e}")
 
