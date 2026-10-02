@@ -20,11 +20,14 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.flows import FlowManager
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     EndFrame,
     Frame,
     InterruptionFrame,
     TextFrame,
     TranscriptionFrame,
+    TTSTextFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -393,6 +396,124 @@ class TTSInputSanitizer(FrameProcessor):
         return text
 
 
+class PlayedTextTracker(FrameProcessor):
+    """Record the assistant text the caller actually heard.
+
+    Issue #4996 (pipecat-ai/pipecat, open as of 1.10.0): on an
+    interruption, TTS text the caller has already heard can be lost
+    from the assistant context. The InterruptionFrame is a SystemFrame
+    and overtakes TTSTextFrames still queued in the assistant
+    aggregator's FrameProcessorQueue. The aggregator commits the turn
+    without those words, and the overtaken frames are then prepended
+    to the NEXT assistant message, corrupting both turns.
+
+    This processor records every TTSTextFrame that reaches it. Since
+    it sits between transport.output() and the assistant aggregator,
+    it sees the same frames the aggregator receives, including the
+    ones that the interruption will overtake.
+
+    On interruption, the recorded text for the interrupted turn is
+    stashed in `_interrupted_text` and can be read by the
+    on_assistant_turn_stopped handler for comparison against the
+    committed content.
+
+    This class does NOT repair the context. The committed content is
+    not guaranteed to be a clean prefix of the recorded text (STT and
+    TTS may reorder or punctuate differently), and a bad repair is
+    worse than no repair. We instrument first, collect data from a
+    real call, then decide whether a repair is justified.
+
+    Python note: we deliberately do not use a boolean to track "is
+    the bot speaking". We track it by intercepting BotStartedSpeaking
+    and BotStoppedSpeaking frames, which the transport emits itself.
+    That is the most reliable signal, it cannot desync from the
+    actual audio state.
+    """
+
+    def __init__(self) -> None:
+        # Every FrameProcessor subclass must call super().__init__().
+        super().__init__()
+
+        # Words accumulated for the current bot turn. Reset on
+        # BotStartedSpeakingFrame.
+        self._current_turn: list[str] = []
+
+        # Text of the most recent turn that was interrupted.
+        # Consumed by consume_interrupted_text().
+        self._interrupted_text: str = ""
+
+        # Set to True when a BotStartedSpeakingFrame has arrived and
+        # no matching BotStoppedSpeakingFrame or InterruptionFrame
+        # has been seen yet. Guards against stray TTSTextFrames that
+        # arrive outside a turn (should not happen, but defensive).
+        self._bot_speaking: bool = False
+
+    async def process_frame(
+        self,
+        frame: Frame,
+        direction: FrameDirection,
+    ) -> None:
+        # Pipecat requires every processor to call super().process_frame
+        # first. It handles frame-lifecycle bookkeeping. Skipping it
+        # causes downstream processors to stall.
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, BotStartedSpeakingFrame):
+            # The bot just began speaking. Start a fresh turn buffer.
+            self._bot_speaking = True
+            self._current_turn = []
+            await self.push_frame(frame, direction)
+            return
+
+        if isinstance(frame, TTSTextFrame):
+            # A word or phrase was just released by the transport.
+            # The caller heard it. Record it, then forward it so the
+            # assistant aggregator can add it to context.
+            self._current_turn.append(frame.text)
+            await self.push_frame(frame, direction)
+            return
+
+        if isinstance(frame, InterruptionFrame):
+            # The caller barged in. Whatever we have recorded for
+            # this turn is text the caller heard BEFORE the
+            # interruption. Stash it so the handler can compare.
+            if self._bot_speaking and self._current_turn:
+                self._interrupted_text = " ".join(self._current_turn).strip()
+                logger.debug(
+                    f"PlayedTextTracker: interrupted turn had "
+                    f"{len(self._current_turn)} frames, "
+                    f"text={self._interrupted_text[:120]!r}"
+                )
+            self._current_turn = []
+            self._bot_speaking = False
+            await self.push_frame(frame, direction)
+            return
+
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            # The bot finished speaking normally (no interruption).
+            # Discard the buffer, the aggregator committed the full
+            # turn and there is nothing to compare.
+            self._current_turn = []
+            self._bot_speaking = False
+            await self.push_frame(frame, direction)
+            return
+
+        # Any other frame passes through untouched.
+        await self.push_frame(frame, direction)
+
+    def consume_interrupted_text(self) -> str:
+        """Return and clear the stashed interrupted-turn text.
+
+        Called from the on_assistant_turn_stopped handler. Returns
+        an empty string if no interruption occurred since the last
+        call, or if the interruption happened before any TTSTextFrame
+        was released.
+        """
+        text = self._interrupted_text
+        self._interrupted_text = ""
+        return text
+
+
 # ====== Pipeline factory ======
 async def create_agent_pipeline(
     transport: Any,
@@ -502,6 +623,27 @@ async def create_agent_pipeline(
     @context_aggregator.assistant().event_handler("on_assistant_turn_stopped")  # type: ignore[misc, untyped-decorator]
     async def _on_assistant_turn_stopped(aggregator: Any, message: Any) -> None:
         content = getattr(message, "content", None)
+        interrupted = getattr(message, "interrupted", False)
+
+        # --- Phase 6.1.C: detect assistant context loss (#4996) ---
+        if interrupted:
+            played = played_tracker.consume_interrupted_text()
+            committed = content or ""
+            logger.warning(
+                f"assistant_interrupted "
+                f"committed_len={len(committed)} "
+                f"played_len={len(played)} "
+                f"committed={committed[:100]!r} "
+                f"played={played[:100]!r}"
+            )
+            # If the committed text is shorter than the played text,
+            # the aggregator lost the tail. This is issue #4996.
+            # We log the delta but do NOT repair the context yet.
+            if played and committed and not played.startswith(committed):
+                logger.error(
+                    f"assistant_context_loss_suspected "
+                    f"played={played[:120]!r} committed={committed[:120]!r}"
+                )
         if content:
             session_state.last_assistant_utterance = content
             logger.debug(f"Assistant turn recorded: {content[:80]!r}")
@@ -569,6 +711,7 @@ async def create_agent_pipeline(
 
     # ====== 6. Pipeline ======
     guard = PromptInjectionGuard(lang_config.guardrail_deflect)
+    played_tracker = PlayedTextTracker()
 
     pipeline = Pipeline(
         [
@@ -583,6 +726,7 @@ async def create_agent_pipeline(
             TTSInputSanitizer(session_state),
             tts,
             transport.output(),
+            played_tracker,  # <-- new
             context_aggregator.assistant(),
         ]
     )
