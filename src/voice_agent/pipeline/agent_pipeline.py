@@ -19,7 +19,13 @@ from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnal
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.flows import FlowManager
-from pipecat.frames.frames import Frame, TextFrame, TranscriptionFrame
+from pipecat.frames.frames import (
+    EndFrame,
+    Frame,
+    InterruptionFrame,
+    TextFrame,
+    TranscriptionFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -83,6 +89,152 @@ class CallSessionState:
 
 
 # ====== Frame processors ======
+class SplitUtteranceMerger(FrameProcessor):
+    """Merge split STT fragments into a single TranscriptionFrame.
+
+    Sarvam STT occasionally splits one continuous utterance into two
+    transcriptions when VAD fires a stop mid-thought. From the
+    12:26 test call:
+
+        12:27:10.843  transcript='Hmm'          audio_duration=1.216
+        12:27:12.359  transcript='and the call' audio_duration=1.440
+
+    The audio was continuous (gap between segments was ~99 ms), but
+    the LLM saw two separate turns and replied to each. Neither
+    fragment made sense on its own.
+
+    The fix is a "debounce" pattern borrowed from UI programming:
+    when a TranscriptionFrame arrives, hold it for `merge_window`
+    seconds. If another TranscriptionFrame arrives before the
+    timer expires, concatenate the two and restart the timer. When
+    the timer finally expires with no new fragment, push the held
+    frame downstream.
+
+    Trade-off: adds up to `merge_window` seconds of latency to
+    every caller turn. For telephony, where callers pause naturally
+    between thoughts, this is acceptable. The window is configurable
+    and will be tuned from real call data.
+
+    Python note on asyncio: the background timer is created with
+    `asyncio.create_task()`. Python's event loop only keeps a WEAK
+    reference to tasks, so a task with no strong reference can be
+    garbage-collected before it runs. We store the task on
+    `self._flush_task` to prevent that: the same footgun that is
+    documented at the top of this module.
+    """
+
+    def __init__(self, merge_window: float = 2.0) -> None:
+        # Every FrameProcessor subclass must call super().__init__().
+        # This initializes Pipecat's internal queues and lifecycle
+        # bookkeeping.
+        super().__init__()
+        self._merge_window = merge_window
+
+        # The frame we are holding back from the pipeline. `None`
+        # means nothing is pending: the previous frame was already
+        # pushed downstream.
+        self._pending: TranscriptionFrame | None = None
+
+        # Strong reference to the flush timer. See the class
+        # docstring for why this is required.
+        self._flush_task: asyncio.Task[None] | None = None
+
+    async def process_frame(
+        self,
+        frame: Frame,
+        direction: FrameDirection,
+    ) -> None:
+        # Pipecat requires every processor to call super().process_frame
+        # first. It handles frame-lifecycle bookkeeping. Skipping it
+        # causes downstream processors to stall.
+        await super().process_frame(frame, direction)
+
+        # If the pipeline is being interrupted or shut down, we
+        # must NOT hold frames back, push them now. Otherwise:
+        #   - an interruption could deliver a stale fragment AFTER
+        #     the user has already changed topic
+        #   - an EndFrame could silently drop the last utterance
+        #     the caller spoke, and the LLM would never respond
+        if isinstance(frame, (InterruptionFrame, EndFrame)):
+            await self._flush_pending()
+            await self.push_frame(frame, direction)
+            return
+
+        # Every other frame type passes through untouched. Metrics,
+        # bot-speaking notifications, StartFrame, none of these are
+        # candidates for merging, and holding them would break the
+        # pipeline.
+        if not isinstance(frame, TranscriptionFrame):
+            await self.push_frame(frame, direction)
+            return
+
+        # We now know this is a TranscriptionFrame. Two cases:
+        #   (a) Nothing pending  -> hold this frame and start the timer
+        #   (b) Something pending -> concatenate, then restart the timer
+        if self._pending is None:
+            self._pending = frame
+            logger.debug(f"Holding fragment: {frame.text!r}")
+        else:
+            previous_text = self._pending.text
+            merged_text = f"{previous_text.strip()} {frame.text.strip()}"
+
+            # Mutate the held frame's text in place. We do NOT
+            # construct a new TranscriptionFrame, because that would
+            # discard other attributes (language, finalized, result)
+            # that Sarvam may have populated. TextFrame.text is a
+            # plain attribute in Pipecat 1.10 and is safe to assign.
+            self._pending.text = merged_text
+
+            logger.debug(
+                f"Merged split utterance: {merged_text!r} "
+                f"(from {previous_text!r} + {frame.text!r})"
+            )
+
+        # Restart the flush timer. If a new fragment arrives before
+        # it fires, this task is cancelled and replaced.
+        self._schedule_flush()
+
+    async def _flush_pending(self) -> None:
+        """Push the held frame downstream and stop the timer.
+
+        Safe to call when nothing is pending. This matters because
+        InterruptionFrame and EndFrame can arrive in quick
+        succession, each triggering a flush.
+        """
+        self._cancel_flush()
+        if self._pending is not None:
+            frame = self._pending
+            self._pending = None
+            logger.debug(f"Flushing merged frame: {frame.text!r}")
+            await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+
+    def _schedule_flush(self) -> None:
+        """Start (or restart) the background flush timer."""
+        self._cancel_flush()
+        self._flush_task = asyncio.create_task(self._flush_after_delay())
+
+    async def _flush_after_delay(self) -> None:
+        """Wait `merge_window` seconds, then flush whatever is held."""
+        await asyncio.sleep(self._merge_window)
+
+        # This coroutine IS the timer. Do not call _cancel_flush()
+        # here — that would try to cancel our own task. Do the work
+        # directly and clear the reference.
+        frame = self._pending
+        self._pending = None
+        self._flush_task = None
+
+        if frame is not None:
+            logger.debug(f"Flushing after {self._merge_window}s window: {frame.text!r}")
+            await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+
+    def _cancel_flush(self) -> None:
+        """Stop the pending timer, if any."""
+        if self._flush_task is not None and not self._flush_task.done():
+            self._flush_task.cancel()
+        self._flush_task = None
+
+
 class TranscriptionDeduplicator(FrameProcessor):
     """Suppress near-identical transcriptions within a time window.
 
@@ -422,6 +574,7 @@ async def create_agent_pipeline(
         [
             transport.input(),
             stt,
+            SplitUtteranceMerger(merge_window=2.0),  # <-- new line
             TranscriptionDeduplicator(),
             guard,
             UtteranceTracker(session_state),
