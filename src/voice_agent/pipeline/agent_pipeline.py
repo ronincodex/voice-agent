@@ -84,40 +84,79 @@ class CallSessionState:
 
 # ====== Frame processors ======
 class TranscriptionDeduplicator(FrameProcessor):
-    """Suppress consecutive identical transcriptions within a time window.
+    """Suppress near-identical transcriptions within a time window.
 
-    Sarvam STT occasionally emits the same transcription twice for a single
-    utterance when VAD fires multiple start events. This processor filters
-    duplicates so the LLM context stays clean.
+    Sarvam STT occasionally emits variants of the same utterance that
+    differ only in case or punctuation:
 
-    IMPORTANT: super().process_frame() must be called so that Pipecat's
-    base class can maintain its internal frame lifecycle bookkeeping.
-    Without it, downstream processors (aggregator, LLM, TTS) may stall.
+        "I need Cloud Services"  vs  "I need cloud services."
+        "Call me later"          vs  "call me later"
+        "Haan"                   vs  "haan"
+
+    The original implementation used exact string equality, so these
+    variants slipped through and the LLM received the same user turn
+    twice. We now normalize both sides before comparing:
+
+        1. strip punctuation (ASCII and Indic danda)
+        2. lowercase
+        3. strip leading/trailing whitespace
+
+    Only consecutive duplicates within `window_seconds` are filtered.
+    A legitimate repeat after the window is preserved.
+
+    Python concept note: `re.Pattern[str]` is a generic type: it tells
+    mypy that `_PUNCT` is a compiled regex whose `.sub()` returns `str`.
+    Without the type parameter, mypy strict mode would report an error.
     """
 
-    def __init__(self, window_seconds: float = 2.0) -> None:
+    # Character class [^\w\s] means "not (word character OR whitespace)".
+    # In Python 3, \w matches Unicode letters (Hindi, Tamil, etc.) plus
+    # digits and underscore, so we only strip punctuation and symbols.
+    _PUNCT: re.Pattern[str] = re.compile(r"[^\w\s]")
+
+    def __init__(self, window_seconds: float = 3.0) -> None:
+        # super().__init__() initializes Pipecat's FrameProcessor base
+        # class. Every FrameProcessor subclass must call it.
         super().__init__()
         self._window = window_seconds
-        self._last_transcript: str | None = None
+        self._last_normalized: str | None = None
         self._last_time: float = 0.0
+
+    @classmethod
+    def _normalize(cls, text: str) -> str:
+        """Return a comparison-friendly form of `text`.
+
+        `cls._PUNCT` is a classmethod-style access to the class variable
+        `_PUNCT`. Using `cls` (rather than hardcoding the class name)
+        means subclasses would see their own `_PUNCT` if they overrode it.
+        """
+        without_punct = cls._PUNCT.sub("", text)
+        return without_punct.lower().strip()
 
     async def process_frame(
         self,
         frame: Frame,
         direction: FrameDirection,
     ) -> None:
+        # Always call super().process_frame() first: Pipecat relies on
+        # it for internal frame-lifecycle bookkeeping. Skipping it
+        # causes downstream processors to stall.
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TranscriptionFrame):
             now = time.monotonic()
+            normalized = self._normalize(frame.text)
+
             if (
-                frame.text == self._last_transcript
+                normalized == self._last_normalized
                 and now - self._last_time < self._window
             ):
-                logger.debug(f"Deduplicated transcript: {frame.text}")
+                logger.debug(f"Deduplicated transcript (normalized): {frame.text!r}")
                 return
-            self._last_transcript = frame.text
+
+            self._last_normalized = normalized
             self._last_time = now
+
         await self.push_frame(frame, direction)
 
 
