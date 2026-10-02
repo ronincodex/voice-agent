@@ -108,10 +108,19 @@ class SplitUtteranceMerger(FrameProcessor):
 
     The fix is a "debounce" pattern borrowed from UI programming:
     when a TranscriptionFrame arrives, hold it for `merge_window`
-    seconds. If another TranscriptionFrame arrives before the
-    timer expires, concatenate the two and restart the timer. When
-    the timer finally expires with no new fragment, push the held
-    frame downstream.
+    seconds. If another TranscriptionFrame arrives before the timer
+    expires, compare the two at the word level:
+
+        - Identical words      -> ignore the newer frame
+        - New extends pending  -> replace (progressive STT)
+        - Pending extends new  -> ignore the shorter one
+        - Neither extends      -> concatenate (genuine split)
+
+    Word-level prefix matching (not character-level) prevents false
+    positives like "cat" vs "category". The 12:26 test call showed
+    a naive concatenation produced "Hello Hello Hello" for a single
+    spoken "Hello" because Sarvam emits progressive transcripts of
+    the same audio.
 
     Trade-off: adds up to `merge_window` seconds of latency to
     every caller turn. For telephony, where callers pause naturally
@@ -142,6 +151,17 @@ class SplitUtteranceMerger(FrameProcessor):
         # docstring for why this is required.
         self._flush_task: asyncio.Task[None] | None = None
 
+    @staticmethod
+    def _compare_words(text: str) -> list[str]:
+        """Return a word list for prefix comparison.
+
+        We lowercase and strip punctuation, then split on whitespace,
+        Word-level (rather than character-level) comparison prevents
+        false positives like "cat" vs "category".
+        """
+        cleaned = re.sub(r"[^\w\s]", "", text).lower()
+        return cleaned.split()
+
     async def process_frame(
         self,
         frame: Frame,
@@ -171,27 +191,54 @@ class SplitUtteranceMerger(FrameProcessor):
             await self.push_frame(frame, direction)
             return
 
-        # We now know this is a TranscriptionFrame. Two cases:
+        # We now know this is a TranscriptionFrame. Three cases:
         #   (a) Nothing pending  -> hold this frame and start the timer
-        #   (b) Something pending -> concatenate, then restart the timer
+        #   (b) Identical or progressive STT -> keep the longer text
+        #   (c) Genuine split    -> concatenate
         if self._pending is None:
             self._pending = frame
             logger.debug(f"Holding fragment: {frame.text!r}")
         else:
-            previous_text = self._pending.text
-            merged_text = f"{previous_text.strip()} {frame.text.strip()}"
+            prev_text = self._pending.text
+            new_text = frame.text
+            prev_words = self._compare_words(prev_text)
+            new_words = self._compare_words(new_text)
 
-            # Mutate the held frame's text in place. We do NOT
-            # construct a new TranscriptionFrame, because that would
-            # discard other attributes (language, finalized, result)
-            # that Sarvam may have populated. TextFrame.text is a
-            # plain attribute in Pipecat 1.10 and is safe to assign.
-            self._pending.text = merged_text
+            if prev_words == new_words:
+                # Same words in the same order. Sarvam re-emitted
+                # the same audio. Ignore the new frame: the pending
+                # one already carries the correct text.
+                logger.debug(f"Ignoring identical fragment: {new_text!r}")
 
-            logger.debug(
-                f"Merged split utterance: {merged_text!r} "
-                f"(from {previous_text!r} + {frame.text!r})"
-            )
+            elif new_words[: len(prev_words)] == prev_words:
+                # The new fragment extends the pending one at the
+                # word level. This is progressive STT: Sarvam is
+                # re-emitting the same audio with more context.
+                # Replace rather than concatenate, otherwise the
+                # overlapping prefix would be duplicated.
+                logger.debug(
+                    f"Replacing with extended transcript: {prev_text!r} -> {new_text!r}"
+                )
+                self._pending.text = new_text
+
+            elif prev_words[: len(new_words)] == new_words:
+                # The pending fragment extends the new one. Sarvam
+                # emitted a shorter correction of the same audio.
+                # Ignore the shorter version, keep the longer.
+                logger.debug(
+                    f"Ignoring shorter fragment: {new_text!r} "
+                    f"(pending is {prev_text!r})"
+                )
+
+            else:
+                # Neither is a prefix of the other: two genuinely
+                # distinct fragments of one utterance. Concatenate.
+                merged_text = f"{prev_text.strip()} {new_text.strip()}"
+                self._pending.text = merged_text
+                logger.debug(
+                    f"Merged split utterance: {merged_text!r} "
+                    f"(from {prev_text!r} + {new_text!r})"
+                )
 
         # Restart the flush timer. If a new fragment arrives before
         # it fires, this task is cancelled and replaced.
