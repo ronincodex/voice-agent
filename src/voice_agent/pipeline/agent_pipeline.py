@@ -40,8 +40,9 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.sarvam.llm import SarvamLLMService
 from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
+from pipecat.turns.user_mute import FunctionCallUserMuteStrategy
 from pipecat.turns.user_start import (
-    TranscriptionUserTurnStartStrategy,
+    MinWordsUserTurnStartStrategy,
     VADUserTurnStartStrategy,
 )
 from pipecat.turns.user_stop import (
@@ -631,22 +632,33 @@ async def create_agent_pipeline(
     context = LLMContext()
     vad = SileroVADAnalyzer(
         params=VADParams(
-            confidence=0.6,  # was 0.7: lower threshold accepts weaker signal
+            # 6.3.C: raise the two acceptance thresholds to reduce
+            # background-noise false positives. Krisp integration
+            # (Pipecat Cloud) is the real fix, deferred to Phase 8.
+            confidence=0.65,  # was 0.6: lower threshold accepts weaker signal
             start_secs=0.15,  # was 0.2: faster speech-onset detection
             stop_secs=0.2,  # REQUIRED by Smart Turn v3 (training-data value, do not change)
-            min_volume=0.3,  # was 0.6: softer callers now captured
+            min_volume=0.4,  # was 0.6 than 0.3: softer callers now captured
         )
     )
 
-    # Turn strategies resolve the asymmetry in PIpecat issue #3643:
-    # a turn can START from a transcription without VAD, but the
-    # TurnAnalyzer stop strategy requires a VAD event. Adding a
-    # transcription-based stop strategy as fallback means short/soft
-    # utterances that VAD misses still finalize their turn.
+    # Turn strategies: three-layer defense against false barge-ins.
+    #
+    # 1. VADUserTurnStartStrategy -> fires on raw speech energy.
+    #    Required because Smart Turn v3's stop strategy needs a
+    #    VAD event to finalize a turn.
+    #
+    # 2. MinWordsUserTurnStartStrategy(min_words=2) -> requires 2+
+    #    committed words IF the bot is currently speaking. When the
+    #    bot is silent, 1 word is enough. Source: pipecat-ai/pipecat
+    #    user_start/min_words.py.
+    #
+    # use_interim=False: interim STT results are unstable and would
+    # trigger spurious starts.
     user_turn_strategies = UserTurnStrategies(
         start=[
             VADUserTurnStartStrategy(),
-            TranscriptionUserTurnStartStrategy(),
+            MinWordsUserTurnStartStrategy(min_words=2, use_interim=False),
         ],
         stop=[
             TurnAnalyzerUserTurnStopStrategy(
@@ -662,6 +674,13 @@ async def create_agent_pipeline(
         user_params=LLMUserAggregatorParams(
             vad_analyzer=vad,
             user_turn_strategies=user_turn_strategies,
+            # 6.3.B: mute caller audio while a Flows tool is executing.
+            # Prevents the LLM from responding to mid-tool utterances
+            # instead of completing the tool's intent.
+            # FunctionCallUserMuteStrategy.__init__ has no annotations
+            # in Pipecat 1.10, so mypy strict flags the call. Runtime
+            # behavior is verified by the import test and the test call.
+            user_mute_strategies=[FunctionCallUserMuteStrategy()],  # type: ignore[no-untyped-call]
             user_turn_stop_timeout=1.5,  # was 5.0 than changed to 3.0: faster fallback
         ),
     )
