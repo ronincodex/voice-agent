@@ -11,6 +11,7 @@ Compatible with Pipecat 1.x (universal LLMContext API).
 import asyncio
 import re
 import time
+import unicodedata
 from typing import Any
 
 from loguru import logger
@@ -65,6 +66,34 @@ settings = get_settings()
 # Without this, asyncio.create_task() results may be garbage collected
 # before they run (Python's asyncio footgun).
 _background_tasks: set[asyncio.Task[None]] = set()
+
+
+# ====== Unicode text helpers ======
+def _strip_punctuation_keep_marks(text: str) -> str:
+    """Remove punctuation and symbols. Keep letters, marks, digits, spaces.
+
+    Python's regex `\\w` does NOT match Unicode combining marks
+    (categories Mn, Mc, Me). A naive `[^\\w\\s]` strip therefore
+    silently removes Devanagari matras (ा, ि, ी), anusvara (ं), and
+    visarga (ः) along with actual punctuation. That corrupted Hindi
+    and Tamil text in the merger and the deduplicator until the
+    Phase 6.4 tests caught it.
+
+    This helper distinguishes characters by Unicode category:
+
+        L* (Letter)      -> keep  (ह, क, A, z)
+        M* (Mark)        -> keep  (ा, ि, ं, ்) combining marks
+        N* (Number)      -> keep  (1, २)
+        Z* (Separator)   -> keep  (space, via isspace())
+        P* (Punctuation) -> strip (., !, ।, ?)
+        S* (Symbol)      -> strip (+, =, $)
+
+    Discovered by tests/unit/test_barge_in.py
+    test_compare_words_strips_punctuation.
+    """
+    return "".join(
+        c for c in text if c.isspace() or unicodedata.category(c)[0] in ("L", "M", "N")
+    )
 
 
 # ====== Per-call shared state ======
@@ -156,11 +185,12 @@ class SplitUtteranceMerger(FrameProcessor):
     def _compare_words(text: str) -> list[str]:
         """Return a word list for prefix comparison.
 
-        We lowercase and strip punctuation, then split on whitespace,
-        Word-level (rather than character-level) comparison prevents
-        false positives like "cat" vs "category".
+        Delegates punctuation stripping to the module-level helper,
+        which preserves Unicode combining marks that the regex approach
+        silently dropped. Word-level (rather than character-level)
+        comparison prevents false positives like "cat" vs "category"
         """
-        cleaned = re.sub(r"[^\w\s]", "", text).lower()
+        cleaned = _strip_punctuation_keep_marks(text).lower()
         return cleaned.split()
 
     async def process_frame(
@@ -315,7 +345,7 @@ class TranscriptionDeduplicator(FrameProcessor):
     # Character class [^\w\s] means "not (word character OR whitespace)".
     # In Python 3, \w matches Unicode letters (Hindi, Tamil, etc.) plus
     # digits and underscore, so we only strip punctuation and symbols.
-    _PUNCT: re.Pattern[str] = re.compile(r"[^\w\s]")
+    # _PUNCT: re.Pattern[str] = re.compile(r"[^\w\s]")
 
     def __init__(self, window_seconds: float = 3.0) -> None:
         # super().__init__() initializes Pipecat's FrameProcessor base
@@ -329,11 +359,12 @@ class TranscriptionDeduplicator(FrameProcessor):
     def _normalize(cls, text: str) -> str:
         """Return a comparison-friendly form of `text`.
 
-        `cls._PUNCT` is a classmethod-style access to the class variable
-        `_PUNCT`. Using `cls` (rather than hardcoding the class name)
-        means subclasses would see their own `_PUNCT` if they overrode it.
+        Delegates to the module-level `_strip_punctuation_keep_marks`
+        helper, which correctly preserves Unicode combining marks
+        (Devanagari matras, anusvara) that the regex approach silently
+        dropped. See the helper's docstring for the category table.
         """
-        without_punct = cls._PUNCT.sub("", text)
+        without_punct = _strip_punctuation_keep_marks(text)
         return without_punct.lower().strip()
 
     async def process_frame(
