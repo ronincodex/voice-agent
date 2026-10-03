@@ -387,7 +387,7 @@ def _build_qualify_node(
             hang_up_call,
             request_opt_out,  # <-- new
         ],
-        respond_immediately=False,
+        respond_immediately=True,  # <-- was False
     )
 
 
