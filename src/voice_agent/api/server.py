@@ -27,6 +27,14 @@ from pipecat.transports.websocket.fastapi import (
 )
 from pipecat.workers.runner import WorkerRunner
 
+from voice_agent.api.schemas import (
+    ApiResponse,
+    CallDetail,
+    CallStats,
+    CallSummary,
+    PaginatedResponse,
+    RecordingUrl,
+)
 from voice_agent.compliance.calling_window import (
     current_ist_time,
     is_within_calling_window,
@@ -117,6 +125,122 @@ async def health() -> dict[str, Any]:
     return {"status": "ok"}
 
 
+# ====== Phase 7.1: Dashboard read endpoints ======
+
+
+@app.get(
+    "/calls",
+    response_model=PaginatedResponse[CallSummary],
+    tags=["dashboard"],
+)
+async def list_calls(
+    page: int = 1,
+    limit: int = 20,
+    direction: str | None = None,
+    status: str | None = None,
+    language: str | None = None,
+) -> PaginatedResponse[CallSummary]:
+    """Return a paginated, filterable list of calls.
+
+    Query parameters:
+        page      : 1-based page number. Default 1.
+        limit     : Rows per page, 1–100. Default 20.
+        direction : "inbound" or "outbound". Optional.
+        status    : "completed" / "failed" / "busy" / etc. Optional.
+        language  : BCP-47 code, e.g. "hi-IN". Optional.
+
+    Sorted by started_at descending (newest first).
+    """
+    # Clamp limit. Anything above 100 risks a slow response and a
+    # large payload; the dashboard never needs more than 100 rows.
+    limit = max(1, min(limit, 100))
+    page = max(1, page)
+
+    store = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
+    rows, total = await store.list_calls(
+        page=page,
+        limit=limit,
+        direction=direction,
+        status=status,
+        language=language,
+    )
+
+    summaries = [CallSummary.model_validate(row) for row in rows]
+    has_next = page * limit < total
+    has_previous = page > 1
+
+    return PaginatedResponse[CallSummary](
+        data=summaries,
+        total=total,
+        page=page,
+        limit=limit,
+        has_next=has_next,
+        has_previous=has_previous,
+    )
+
+
+@app.get(
+    "/calls/stats",
+    response_model=ApiResponse[CallStats],
+    tags=["dashboard"],
+)
+async def call_stats() -> ApiResponse[CallStats]:
+    """Return the four counter values for the dashboard cards."""
+    store = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
+    counts = await store.get_call_counts()
+    return ApiResponse[CallStats](data=CallStats(**counts))
+
+
+@app.get(
+    "/calls/{call_uuid}",
+    response_model=ApiResponse[CallDetail],
+    tags=["dashboard"],
+)
+async def get_call_detail_route(call_uuid: str) -> ApiResponse[CallDetail]:
+    """Return one call with full transcript and AI summary."""
+    store = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
+    call = await store.get_call_detail(call_uuid)
+    if call is None:
+        raise HTTPException(status_code=404, detail=f"Call {call_uuid} not found")
+    return ApiResponse[CallDetail](data=CallDetail.model_validate(call))
+
+
+@app.get(
+    "/calls/{call_uuid}/recording-url",
+    response_model=ApiResponse[RecordingUrl],
+    tags=["dashboard"],
+)
+async def get_recording_url(call_uuid: str) -> ApiResponse[RecordingUrl]:
+    """Return a presigned URL for the call's recording.
+
+    Presigned URLs expire. The frontend should fetch a fresh one on
+    every play action rather than caching the URL in component state.
+    The URL is generated against the R2 key already stored in the
+    calls.recording_url column, not against a public bucket path.
+    """
+    store = SupabaseStore(settings.supabase_url, settings.supabase_service_key)
+    call = await store.get_call_by_uuid(call_uuid)
+    if call is None:
+        raise HTTPException(status_code=404, detail=f"Call {call_uuid} not found")
+    r2_key = call.get("recording_url")
+    if not r2_key:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No recording available for call {call_uuid}",
+        )
+
+    r2 = R2Storage(
+        account_id=settings.r2_account_id,
+        access_key_id=settings.r2_access_key_id,
+        secret_access_key=settings.r2_secret_access_key,
+        bucket_name=settings.r2_bucket_name,
+    )
+    url = r2.generate_presigned_url(r2_key, expires_in=3600)
+    return ApiResponse[RecordingUrl](
+        data=RecordingUrl(url=url, expires_in=3600),
+    )
+
+
 @app.get("/languages")
 async def list_languages() -> dict[str, Any]:
     """List all supported languages for the frontend/CLI."""
@@ -151,13 +275,23 @@ async def incoming_webhook(request: Request) -> HTMLResponse:
     Returns VobizXML that records the call and opens a WebSocket.
     """
     form = await request.form()
-    from_number = str(form.get("From", "unknown"))
+    from_number = _normalize_phone(str(form.get("From", "")))
     to_number = _normalize_phone(str(form.get("To", "")))
 
     language = resolve_language_for_inbound(to_number)
 
     host = request.headers.get("host", "")
-    ws_url = f"wss://{host}/ws?language={language}&to={quote(to_number, safe='')}"
+    # Carry from, to, and direction into the WebSocket query string so
+    # the handler can populate calls. from_number and calls. to_number.
+    # Previously both were hardcoded to "" in create_call.
+    ws_url = (
+        f"wss://{host}/ws?"
+        f"language={language}"
+        f"&direction=inbound"
+        f"&from={quote(from_number, safe='')}"
+        f"&to={quote(to_number, safe='')}"
+    )
+
     # XML text content requires & to be escaped as &amp;. Vobiz's
     # parser rejects the VobizXML otherwise (HangupCause: Invalid
     # Answer XML).
@@ -315,8 +449,18 @@ async def answer_webhook(request: Request) -> HTMLResponse:
     if state:
         state.mark_answered()
     host = request.headers.get("host", "")
+    # For outbound calls the "from" is our Vobiz number. Vobiz may
+    # not include a From field on the answer webhook, so fall back to
+    # the configured number.
+    from_number = _normalize_phone(str(form.get("From", settings.vobiz_phone_number)))
     to_number = _normalize_phone(str(form.get("To", "")))
-    ws_url = f"wss://{host}/ws?language={language}&to={quote(to_number, safe='')}"
+    ws_url = (
+        f"wss://{host}/ws?"
+        f"language={language}"
+        f"&direction=outbound"
+        f"&from={quote(from_number, safe='')}"
+        f"&to={quote(to_number, safe='')}"
+    )
     ws_url_xml = xml_escape(ws_url)
 
     vobiz_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -347,6 +491,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     language = websocket.query_params.get("language", "hi-IN")
     direction = websocket.query_params.get("direction", "outbound")
+    from_number = websocket.query_params.get("from", "")
     to_number = websocket.query_params.get("to", "")
     logger.info(f"WebSocket connected: language={language}, direction={direction}")
 
@@ -419,8 +564,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         internal_call_id = await supabase.create_call(
             call_uuid=call_id,
             direction=direction,
-            from_number="",
-            to_number="",
+            from_number=from_number,
+            to_number=to_number,
             language=language,
         )
         flow_manager.state["internal_call_id"] = internal_call_id
