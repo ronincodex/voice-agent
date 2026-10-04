@@ -1,16 +1,27 @@
+import { CallsTable } from "@/components/calls-table";
+import { fetchPaginated } from "@/lib/api";
 import { callsSearchParamsCache } from "@/lib/search-params";
+import type { CallSummary } from "@/lib/types";
 
 /**
- * Call list page. This placeholder exists so the sidebar's
- * "Calls" link does not 404 while Part 2 is being built.
+ * Call list page. Server Component that reads the URL params,
+ * forwards them as query string to the backend, and passes the
+ * rows to the table.
  *
- * The current version reads the URL params and displays them as
- * plain text, which proves the nuqs plumbing works end to end:
- * the URL is parsed, defaults are applied, and a Server Component
- * receives the typed values without any client-side state.
+ * Data flow:
+ *   1. URL contains page / direction / status / language
+ *   2. callsSearchParamsCache parses and validates them
+ *   3. We build a matching query string for the backend
+ *   4. fetchPaginated<CallSummary> hits /calls with that query
+ *   5. The envelope's data array goes to CallsTable
  *
- * Part 2 replaces this body with the paginated table.
+ * The Server Component re-runs on every URL change because
+ * searchParams is a dynamic value. No client-side re-fetch, no
+ * useEffect, no loading spinners after the initial render —
+ * loading.tsx covers the streaming case.
  */
+const PAGE_SIZE = 20;
+
 export default async function CallsPage({
   searchParams,
 }: {
@@ -18,27 +29,34 @@ export default async function CallsPage({
 }) {
   const params = await callsSearchParamsCache.parse(searchParams);
 
+  // Build the query string for the backend. Only include params
+  // that are set, so the URL stays clean and the backend receives
+  // exactly what it needs.
+  const query = new URLSearchParams();
+  query.set("page", String(params.page));
+  query.set("limit", String(PAGE_SIZE));
+  if (params.direction) query.set("direction", params.direction);
+  if (params.status) query.set("status", params.status);
+  if (params.language) query.set("language", params.language);
+
+  const result = await fetchPaginated<CallSummary>(`/calls?${query.toString()}`);
+
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Calls</h2>
-        <p className="text-sm text-muted-foreground">
-          Every call the agent has made or received.
-        </p>
+      <div className="flex items-end justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Calls</h2>
+          <p className="text-sm text-muted-foreground">
+            {result.total} {result.total === 1 ? "call" : "calls"} total
+          </p>
+        </div>
       </div>
 
-      <div className="rounded-lg border bg-card p-6">
-        <p className="text-sm text-muted-foreground">
-          URL state plumbing is in place. Parsed params:
-        </p>
-        <pre className="mt-3 rounded bg-muted p-3 text-xs">
-          {JSON.stringify(params, null, 2)}
-        </pre>
-        <p className="mt-3 text-xs text-muted-foreground">
-          Try appending <code>?page=2&amp;direction=outbound</code> to
-          the URL and watching the parsed values change.
-        </p>
-      </div>
+      {/* Filters and pagination controls arrive in Part 3.
+          For now, they are absent. The table renders the
+          first 20 rows sorted newest-first. */}
+
+      <CallsTable data={result.data} />
     </div>
   );
 }
