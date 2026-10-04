@@ -167,3 +167,64 @@ class CallStats(BaseModel):
     completed: int
     failed: int
     in_progress: int
+
+
+# ====== Phase 7.2: Agent configuration ======
+
+
+class VoiceOverride(BaseModel):
+    """Per-language TTS voice and STT locale overrides.
+
+    Stored in agent_configs.voice_overrides as JSONB keyed by BCP-47
+    code. Every field is optional: a language with no override uses
+    the defaults from LanguageConfig.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tts_voice: str | None = None
+    tts_language_code: str | None = None
+    stt_locale: str | None = None
+
+
+class AgentConfigPayload(BaseModel):
+    """Request body for PUT /agents/config.
+
+    extra='forbid' means an unknown field is a 422 instead of being
+    silently ignored. That matters here: a typo like 'objectiv' would
+    otherwise save silently and the operator would not learn until a
+    call goes wrong.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_name: str = Field(min_length=1, max_length=64)
+    company_name: str = Field(min_length=1, max_length=128)
+    company_info: str = Field(default="", max_length=4000)
+    objective: str = Field(min_length=1, max_length=1000)
+    personality: str = Field(min_length=1, max_length=1000)
+    greeting_template: str = Field(min_length=1, max_length=1000)
+    max_call_duration_seconds: int = Field(default=600, ge=30, le=3600)
+    primary_language: str = Field(min_length=2, max_length=10)
+    supported_languages: list[str] = Field(min_length=1, max_length=10)
+    voice_overrides: dict[str, VoiceOverride] = Field(default_factory=dict)
+
+
+class AgentConfig(AgentConfigPayload):
+    """Response model for GET /agents/config.
+
+    Identical to the payload plus two server-added fields:
+        - config_key: the singleton key. Always 'default' by the
+        table's CHECK constraint. Included so the frontend can
+        confirm it is reading the singleton row.
+        - updated_at: when the row was last written.
+
+    The write payload (AgentConfigPayload) does not include these
+    because the client mmust not control them. A client that sent
+    config_key='custom' would be silently rejected by the DB CHECK
+    constraint, and one that sent updated_at would be able to
+    falsify the audit trail.
+    """
+
+    config_key: str = "default"
+    updated_at: datetime | None = None

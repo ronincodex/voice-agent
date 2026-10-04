@@ -52,8 +52,9 @@ from pipecat.turns.user_stop import (
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
-from voice_agent.config.languages import get_language_config
+from voice_agent.config.languages import LanguageConfig, get_language_config
 from voice_agent.config.settings import get_settings
+from voice_agent.db.agent_config import AgentConfigStore
 from voice_agent.db.audit import AuditTrail
 from voice_agent.db.supabase_client import SupabaseStore
 from voice_agent.observability.metrics import MetricsCollector, MetricsObserver
@@ -97,6 +98,109 @@ def _strip_punctuation_keep_marks(text: str) -> str:
 
 
 # ====== Per-call shared state ======
+def _apply_config_overrides(
+    lang_config: LanguageConfig,
+    config: dict[str, Any],
+) -> LanguageConfig:
+    """Return a LanguageConfig with the agent config applied.
+
+    The base LanguageConfig from languages.py carries the
+    language-specific defaults (STT locale, TTS voice, farewell
+    strings, consent disclosure). The agent config carries the
+    operator-editable fields (agent name, company name, greeting
+    template, personality, objective). This function merges the
+    second into the first.
+
+    Overrides applied:
+        - persona_name      <- config.agent_name
+        - greeting_template <- config.greeting_template, with {name}
+                               and {company} substituted
+        - llm_prompt_suffix <- config.personality + objective, appended
+                               to the language-specific instruction
+
+    Fields NOT overridden:
+        - stt_locale, tts_voice, tts_language_code: these are technical
+          choices for the language. The voice_overrides JSONB on the
+          agent config can override them per language; that merge
+          happens in _apply_voice_overrides (below).
+        - consent_disclosure, consent_decline_ack, guardrail_deflect:
+          these are compliance strings. The operator must not be able
+          to edit a legal disclosure from a UI form.
+    """
+
+    overrides: dict[str, Any] = {}
+
+    agent_name = str(config.get("agent_name") or "").strip()
+    if agent_name:
+        overrides["persona_name"] = agent_name
+
+    company = str(config.get("company_name") or "").strip() or "the company"
+
+    greeting_template = str(config.get("greeting_template") or "").strip()
+    if greeting_template:
+        # Substitute {name} and {company}. use the same placeholder
+        # syntax as LanguageConfig.greeting, so a template copied
+        # from languages.py works unchanged.
+        overrides["greeting"] = greeting_template.replace(
+            "{name}", agent_name or lang_config.persona_name
+        ).replace("{company}", company)
+
+    personality = str(config.get("personality") or "").strip()
+    objective = str(config.get("objective") or "").strip()
+    prompt_addendum_parts = []
+    if personality:
+        prompt_addendum_parts.append(f"Personality: {personality}")
+    if objective:
+        prompt_addendum_parts.append(f"Objective of this call: {objective}")
+    if prompt_addendum_parts:
+        overrides["llm_prompt_suffix"] = (
+            lang_config.llm_prompt_suffix + "\n\n" + "\n".join(prompt_addendum_parts)
+        )
+
+    if not overrides:
+        return lang_config
+
+    logger.info(f"Applying agent config overrides: {sorted(overrides.keys())}")
+    return lang_config.model_copy(update=overrides)
+
+
+def _apply_voice_overrides(
+    lang_config: LanguageConfig,
+    config: dict[str, Any],
+) -> LanguageConfig:
+    """Apply per-language TTS voice and STT locale from voice_overrides.
+
+    voice_overrides is JSONB keyed by BCP-47 code. Example:
+
+        {
+            "hi-IN": {"tts_voice": "anushka"},
+            'ta-IN": {"stt_locale": "ta-IN", "tts_voice": "kavitha"}
+        }
+
+    Only the current call's language is consulted. A missing key, or
+    an override with null fields, leaves the language defaults in
+    place.
+    """
+
+    per_lang = (config.get("voice_overrides") or {}).get(lang_config.code)
+    if not isinstance(per_lang, dict):
+        return lang_config
+
+    overrides: dict[str, Any] = {}
+    for key in ("tts_voice", "tts_language_code", "stt_locale"):
+        value = per_lang.get(key)
+        if isinstance(value, str) and value.strip():
+            overrides[key] = value.strip()
+
+    if not overrides:
+        return lang_config
+
+    logger.info(
+        f"Applying voice overrides for {lang_config.code}: {sorted(overrides.keys())}"
+    )
+    return lang_config.model_copy(update=overrides)
+
+
 class CallSessionState:
     """Per-pipeline state shared between frame processors and tool handlers.
 
@@ -609,6 +713,21 @@ async def create_agent_pipeline(
     """
     lang_config = get_language_config(language_code)
     logger.info(f"Creating Flows pipeline for language: {lang_config.name}")
+
+    # Phase 7.2: apply the operator-editable agent config. The
+    # config is cached for 60 s (see agent_config.py), so this is a
+    # Supabase round trip at most once a minute, not once a call.
+    try:
+        config_store = AgentConfigStore(
+            settings.supabase_url, settings.supabase_service_key
+        )
+        agent_config = await config_store.get()
+        lang_config = _apply_config_overrides(lang_config, agent_config)
+        lang_config = _apply_voice_overrides(lang_config, agent_config)
+    except Exception as e:
+        # A config failure must never block a call. Log and proceed
+        # with the in-code defaults from languages.py.
+        logger.error(f"Failed to load agent config, using defaults: {e}")
 
     # Single source of truth for utterance tracking across the pipeline
     # and the Flows handlers. Stored in flow_manager.state so nodes.py

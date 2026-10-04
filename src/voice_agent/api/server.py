@@ -28,6 +28,8 @@ from pipecat.transports.websocket.fastapi import (
 from pipecat.workers.runner import WorkerRunner
 
 from voice_agent.api.schemas import (
+    AgentConfig,
+    AgentConfigPayload,
     ApiResponse,
     CallDetail,
     CallStats,
@@ -40,8 +42,8 @@ from voice_agent.compliance.calling_window import (
     is_within_calling_window,
 )
 from voice_agent.compliance.pii import detect_and_mask
-from voice_agent.config.languages import get_language_config
 from voice_agent.config.settings import get_settings
+from voice_agent.db.agent_config import AgentConfigStore, invalidate_config_cache
 from voice_agent.db.audit import AuditTrail
 from voice_agent.db.supabase_client import SupabaseStore
 from voice_agent.observability.logging_config import (
@@ -239,6 +241,88 @@ async def get_recording_url(call_uuid: str) -> ApiResponse[RecordingUrl]:
     return ApiResponse[RecordingUrl](
         data=RecordingUrl(url=url, expires_in=3600),
     )
+
+
+# ====== Phase 7.2: Agent configuration ======
+
+
+@app.get(
+    "/agents/config",
+    response_model=ApiResponse[AgentConfig],
+    tags=["agents"],
+)
+async def get_agent_config() -> ApiResponse[AgentConfig]:
+    """Return the current agent configuration.
+
+    The cache is shared with the call pipeline (see agent_config.py),
+    so a GET immediately after a PUT may still serve the previous
+    value if the process that handled the PUT is not the one serving
+    this request. Invalidating on write makes that window one cache
+    lifetime at most, and in a single-process deployment the window
+    is zero.
+    """
+    store = AgentConfigStore(settings.supabase_url, settings.supabase_service_key)
+    row = await store.get(use_cache=False)
+    return ApiResponse[AgentConfig](data=AgentConfig.model_validate(row))
+
+
+@app.put(
+    "/agents/config",
+    response_model=ApiResponse[AgentConfig],
+    tags=["agents"],
+)
+async def update_agent_config(
+    payload: AgentConfigPayload,
+) -> ApiResponse[AgentConfig]:
+    """Replace the agent configuration.
+
+    PUT semantics: the body is the full replacement, not a patch.
+    Missing optional fields are reset to their defaults. Use PATCH
+    if you later need partial updates.
+
+    Validation:
+      - Every language in supported_languages must exist in the
+        LanguageConfig registry, so a typo cannot produce a call in
+        a language the pipeline cannot speak.
+      - primary_language must appear in supported_languages.
+      - Every key in voice_overrides must also be a supported
+        language.
+    """
+    from voice_agent.config.languages import LANGUAGES
+
+    unknown = [c for c in payload.supported_languages if c not in LANGUAGES]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unsupported language codes: {unknown}. "
+                f"Supported: {sorted(LANGUAGES.keys())}"
+            ),
+        )
+    if payload.primary_language not in payload.supported_languages:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"primary_language {payload.primary_language!r} must be "
+                f"present in supported_languages"
+            ),
+        )
+    bad_override_keys = [
+        k for k in payload.voice_overrides if k not in payload.supported_languages
+    ]
+    if bad_override_keys:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"voice_overrides keys must be supported languages. "
+                f"Unexpected: {bad_override_keys}"
+            ),
+        )
+
+    store = AgentConfigStore(settings.supabase_url, settings.supabase_service_key)
+    row = await store.upsert(payload.model_dump())
+    invalidate_config_cache()
+    return ApiResponse[AgentConfig](data=AgentConfig.model_validate(row))
 
 
 @app.get("/languages")
@@ -574,11 +658,22 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         logger.error(f"Failed to create Supabase call record: {e}")
         flow_manager.state["internal_call_id"] = None
 
-    lang_config = get_language_config(language)
+    # lang_config = get_language_config(language)
 
     async def _start_flow() -> None:
         await asyncio.sleep(2.0)
         try:
+            # Read the overridden config from flow_manager.state.
+            # create_agent_pipeline applies the Phase 7.2 agent
+            # config (agent_name, greeting_template, personality,
+            # objective, voice_overrides) to its local lang_config
+            # and stores the result in state["lang_config"].
+            # Calling get_language_config(language) here instead
+            # would return the base language config WITHOUT those
+            # overrides, and the greeting node would speak the
+            # default persona name regardless of what PUT
+            # /agents/config wrote.
+            lang_config = flow_manager.state["lang_config"]
             await flow_manager.initialize(build_initial_node(lang_config))
             logger.info(f"Flow initialized for call {call_id}")
         except Exception as e:

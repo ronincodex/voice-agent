@@ -125,3 +125,51 @@ $$;
 
 REVOKE ALL ON FUNCTION public.replace_call_messages(uuid, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.replace_call_messages(uuid, jsonb) TO service_role;
+
+-- Phase 7.2: Agent configuration
+-- Singleton row holding the runtime config for the calling agent.
+-- The CHECK constraint pins config_key to the literal 'default',
+-- so a second row is impossible even by accident. The primary key
+-- gives Supabase's upsert() a conflict target.
+--
+-- Typed columns hold the fields the frontend form edits directly.
+-- The voice_overrides JSONB holds per-language TTS voice and STT
+-- locale selections, keyed by BCP-47 code, so adding a language is
+-- a data change, not a schema migration.
+
+CREATE TABLE IF NOT EXISTS agent_configs (
+    config_key TEXT PRIMARY KEY DEFAULT 'default'
+        CHECK (config_key = 'default'),
+    agent_name TEXT NOT NULL DEFAULT 'Priya',
+    company_name TEXT NOT NULL DEFAULT 'IT-Webhut',
+    company_info TEXT NOT NULL DEFAULT '',
+    objective TEXT NOT NULL DEFAULT 'Qualify inbound leads and schedule follow-ups.',
+    personality TEXT NOT NULL DEFAULT
+        'Professional, friendly, empathetic and conversational.',
+    greeting_template TEXT NOT NULL DEFAULT
+        'Hello! I''m {name} calling from {company}. Is this a good time to speak?',
+    max_call_duration_seconds INT NOT NULL DEFAULT 600
+        CHECK (max_call_duration_seconds BETWEEN 30 AND 3600),
+    primary_language TEXT NOT NULL DEFAULT 'en-IN',
+    supported_languages TEXT[] NOT NULL DEFAULT ARRAY['hi-IN', 'en-IN', 'ta-IN'],
+    voice_overrides JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Seed the singleton row if the table is empty. ON CONFLICT DO NOTHING
+-- keeps this idempotent.
+INSERT INTO agent_configs (config_key) VALUES ('default')
+ON CONFLICT (config_key) DO NOTHING;
+
+ALTER TABLE agent_configs ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE tablename = 'agent_configs'
+          AND policyname = 'Service role full access'
+    ) THEN
+        CREATE POLICY "Service role full access" ON agent_configs
+            FOR ALL USING (auth.role() = 'service_role');
+    END IF;
+END $$;
