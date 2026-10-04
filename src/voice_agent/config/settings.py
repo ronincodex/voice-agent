@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     # Must be False in production.
     bypass_calling_hours: bool = False
 
+    # ====== Frontend (Phase 7.3) ======
+    # The browser origin allowed to make cross-origin requests to
+    # the API. In development this is the Next.js dev server. In
+    # production it becomes the Vercel deployment URL. Read by
+    # the CORSMiddleware in api/server.py
+    frontend_origin: str = "http://localhost:3000"
+
 
 @lru_cache
 def get_settings() -> Settings:

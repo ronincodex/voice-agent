@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from loguru import logger
 from pipecat.serializers.vobiz import VobizFrameSerializer, parse_vobiz_start
@@ -75,6 +76,19 @@ if settings.bypass_calling_hours:
         "This must be false in production."
     )
 app = FastAPI(title="Voice Agent Telephony API")
+
+# CORS: allow the frontend origin to make cross-origin requests.
+# Only the origin from settings is allowed, never "*". A wildcard
+# combined with allow_credentials=True is rejected by browsers
+# anyway, and a wildcard without credentials would let any site
+# call the API. The explicit origin is both safer and correct.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.frontend_origin],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 vobiz_client = VobizClient()
 
