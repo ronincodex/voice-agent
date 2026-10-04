@@ -1,3 +1,5 @@
+import { CallsFilters } from "@/components/calls-filters";
+import { CallsPagination } from "@/components/calls-pagination";
 import { CallsTable } from "@/components/calls-table";
 import { fetchPaginated } from "@/lib/api";
 import { callsSearchParamsCache } from "@/lib/search-params";
@@ -52,11 +54,16 @@ export default async function CallsPage({
         </div>
       </div>
 
-      {/* Filters and pagination controls arrive in Part 3.
-          For now, they are absent. The table renders the
-          first 20 rows sorted newest-first. */}
+      {/* Filters and pagination controls arrive in Part 3.*/}
+
+            <CallsFilters />
 
       <CallsTable data={result.data} />
-    </div>
+
+      <CallsPagination
+        total={result.total}
+        page={result.page}
+        limit={result.limit}
+      />    </div>
   );
 }

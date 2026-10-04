@@ -45,16 +45,27 @@ export type DirectionFilter = (typeof DIRECTION_VALUES)[number];
 export type StatusFilter = (typeof STATUS_VALUES)[number];
 
 /**
- * Client-side parsers. Imported by Client Components that call
- * useQueryState. The `withDefault` chain means a missing param
- * returns the default without needing explicit null checks at
- * every call site.
+ * Every parser carries shallow: false so a URL change triggers a
+ * Next.js navigation and re-runs the Server Component. The default
+ * in nuqs 2.x is shallow: true, which updates the URL via
+ * history.replaceState without a navigation — correct for
+ * client-only filter state, wrong for our architecture where the
+ * URL drives a server fetch.
+ *
+ * Defining it here means every consumer of callsSearchParams
+ * inherits the option. If it lived in the components, one missing
+ * shallow: false in a future file would silently break server
+ * refetching for that control only, which is a hard bug to spot.
  */
+const serverSyncOptions = { shallow: false } as const;
+
 export const callsSearchParams = {
-  page: parseAsInteger.withDefault(1),
-  direction: parseAsStringLiteral(DIRECTION_VALUES),
-  status: parseAsStringLiteral(STATUS_VALUES),
-  language: parseAsString,
+  page: parseAsInteger.withDefault(1).withOptions(serverSyncOptions),
+  direction: parseAsStringLiteral(DIRECTION_VALUES).withOptions(
+    serverSyncOptions,
+  ),
+  status: parseAsStringLiteral(STATUS_VALUES).withOptions(serverSyncOptions),
+  language: parseAsString.withOptions(serverSyncOptions),
 };
 
 /**
