@@ -6,7 +6,7 @@ phone calls in Hindi, English, and Tamil.
 ## Live deployment
 
 - **Frontend**: https://voice-agent-ochre-two.vercel.app
-- **Backend**: (Render deploy scheduled for Phase 8)
+- **Backend**: https://voice-agent-bhnm.onrender.com
 
 ## Status
 
