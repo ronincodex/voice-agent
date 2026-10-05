@@ -110,6 +110,43 @@ developer's laptop?**
 
 The system is now independent of the developer's machine.
 
+## Post-deploy fixes
+
+### Transcript structure regression (Phase 8.1)
+
+The Phase 5.7.4 PII masking step concatenated all same-role
+messages into one string, ran detection on the joined text, then
+replaced the entire transcript with a single row per role. Every
+call's transcript collapsed to two wall-of-text paragraphs.
+
+The concatenation was for a real reason — STT can split a phone
+number across two frames, and per-message detection would miss it.
+But the fix destroyed the transcript as a data structure.
+
+**Found during the Phase 8 verification call.** The transcript of
+a 2m 13s call showed only two messages instead of the expected
+fourteen. Caught by reading the stored data, not by any test.
+
+**Fix:** detection still runs on the joined per-role text so
+cross-frame PII is caught. The masked result is then redistributed
+back into the original per-message rows using an ASCII record
+separator (`\x1e`) to preserve boundaries. Same Postgres RPC, same
+transaction semantics, one row per turn.
+
+Historical rows are not repaired. Backfilling would require
+reconstructing turn boundaries that no longer exist.
+
+Verified: new call placed after the fix shows 14 rows in the
+`messages` table and 14 bubbles in the transcript UI.
+
+### Compliance gate verified
+
+After completing the deployment verification, `BYPASS_CALLING_HOURS`
+was set back to `false` on Render. A call attempt at 23:35 IST was
+correctly rejected with the message *"Outside TRAI calling window
+(9 AM - 9 PM IST). IST now: 23:35"*. The `calling_hours_blocked`
+audit event was written to `call_audit`.
+
 ## Known gaps
 
 - **Cold start latency**: first call after 15 minutes idle takes
