@@ -339,17 +339,25 @@ async def update_agent_config(
     return ApiResponse[AgentConfig](data=AgentConfig.model_validate(row))
 
 
-@app.get("/languages")
-async def list_languages() -> dict[str, Any]:
-    """List all supported languages for the frontend/CLI."""
+@app.get("/languages", response_model=ApiResponse[dict[str, Any]])
+async def list_languages() -> ApiResponse[dict[str, Any]]:
+    """List all supported languages.
+
+    Wrapped in the ApiResponse envelope so fetchApi<T> works
+    uniformly across every read endpoint. This handler predated
+    the Phase 7.1 envelope convention; Phase 7.7 brings it into
+    alignment. No other consumer existed.
+    """
     from voice_agent.config.languages import LANGUAGES
 
-    return {
-        "supported": [
-            {"code": code, "name": cfg.name} for code, cfg in LANGUAGES.items()
-        ],
-        "default": "hi-IN",
-    }
+    return ApiResponse[dict[str, Any]](
+        data={
+            "supported": [
+                {"code": code, "name": cfg.name} for code, cfg in LANGUAGES.items()
+            ],
+            "default": "hi-IN",
+        }
+    )
 
 
 def resolve_language_for_inbound(dialed_number: str) -> str:
