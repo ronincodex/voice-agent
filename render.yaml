@@ -20,14 +20,14 @@ services:
     # healthCheckPath tells Render to wait until /health returns
     # 200 before routing traffic.
     healthCheckPath: /health
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt && pip install -e .
     # The $PORT environment variable is set by Render. uvicorn
     # must bind to 0.0.0.0 and read the port from it.
     startCommand: uvicorn voice_agent.api.server:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11"
+        value: "3.11.9"  # Pin to a version compatible with your project
       # --- Secrets: set these in the Render dashboard ---
       # sync: false means "prompt me, don't read from this file".
       - key: SARVAM_API_KEY
