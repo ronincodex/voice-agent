@@ -26,6 +26,13 @@ A multilingual AI voice calling agent that makes and receives real phone calls i
 
 ## Architecture
 
+![System architecture](docs/architecture.png)
+
+See [docs/architecture.md](docs/architecture.md) for an interactive
+diagram and a guided tour of the data flows.
+
+### Pipeline internals
+
 ```text
 Phone
   └─> Vobiz
