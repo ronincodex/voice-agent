@@ -50,6 +50,10 @@ data/
 recordings/
 *.wav
 *.mp3
+# Keep the sample recording as a deliverable, per the PDF
+# requirement for a sample call recording. All other MP3s remain
+# ignored.
+!docs/samples/sample-recording.mp3
 
 # ===== Pre-commit cache =====
 .pre-commit-cache/
