@@ -208,6 +208,8 @@ class AgentConfigPayload(BaseModel):
     primary_language: str = Field(min_length=2, max_length=10)
     supported_languages: list[str] = Field(min_length=1, max_length=10)
     voice_overrides: dict[str, VoiceOverride] = Field(default_factory=dict)
+    # Phase 7.10: persona gender for grammatical agreement.
+    persona_gender: str = Field(default="female", pattern="^(female|male|neutral)$")
 
 
 class AgentConfig(AgentConfigPayload):

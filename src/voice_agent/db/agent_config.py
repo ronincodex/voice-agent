@@ -141,5 +141,6 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "primary_language": "en-IN",
     "supported_languages": ["hi-IN", "en-IN", "ta-IN"],
     "voice_overrides": {},
+    "persona_gender": "female",
     "updated_at": None,
 }

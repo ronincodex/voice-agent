@@ -134,6 +134,16 @@ def _apply_config_overrides(
     if agent_name:
         overrides["persona_name"] = agent_name
 
+    # Phase 7.10: persona gender. Voice is acoustic, gender is
+    # grammatical. Both must agree, otherwise the LLM writes
+    # 'मैं समझती हूँ' (female) while the TTS speaks with a male
+    # voice, or vice versa. The frontend derives this from the
+    # voice selection automatically, but the field is independent
+    # so a call scenario can override them separately.
+    persona_gender = str(config.get("persona_gender") or "").strip().lower()
+    if persona_gender in ("female", "male", "neutral"):
+        overrides["persona_gender"] = persona_gender
+
     company = str(config.get("company_name") or "").strip() or "the company"
 
     greeting_template = str(config.get("greeting_template") or "").strip()
