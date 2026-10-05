@@ -172,5 +172,3 @@ The **compliance group is separated from data stores** because the two categorie
 The **summariser sits with the data stores** because it is a data-processing task, not a compliance control. It reads a transcript from Supabase, calls an LLM, and writes the result back. Post-call, not regulatory.
 
 ---
-
-*Diagram source: [gitdiagram.com/ronincodex/voice-agent](https://gitdiagram.com/ronincodex/voice-agent). Regenerate if the file structure changes substantially.*
