@@ -87,6 +87,7 @@ export interface AgentConfig {
   primary_language: string;
   supported_languages: string[];
   voice_overrides: Record<string, VoiceOverride>;
+  persona_gender: "female" | "male" | "neutral";
   config_key: string;
   updated_at: string | null;
 }

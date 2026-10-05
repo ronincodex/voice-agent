@@ -48,6 +48,20 @@ const LANGUAGE_NAMES: Record<string, string> = {
 };
 
 /**
+ * Look up the gender of a voice by ID. Returns null if the voice
+ * is not in our curated list, which happens when a config was
+ * saved before that voice was added — a defensive case, not an
+ * expected one.
+ */
+function findVoiceGender(voiceId: string): "female" | "male" | null {
+  for (const lang of Object.values(VOICE_OPTIONS)) {
+    const match = lang.find((v) => v.id === voiceId);
+    if (match) return match.gender;
+  }
+  return null;
+}
+
+/**
  * Agent configuration form.
  *
  * RHF handles state and validation. On submit, we PUT to
@@ -72,6 +86,7 @@ export function AgentConfigForm({
     resolver: zodResolver(AgentConfigSchema),
     defaultValues: {
       agent_name: initialConfig.agent_name,
+      persona_gender: initialConfig.persona_gender,
       company_name: initialConfig.company_name,
       company_info: initialConfig.company_info,
       objective: initialConfig.objective,
@@ -122,6 +137,11 @@ const {
     name: "voice_overrides",
   });
 
+  const watchedPersonaGender = useWatch({
+      control: form.control,
+      name: "persona_gender",
+  });
+
   // Fall back to an empty object so the Voice Selection card
   // can read [langCode] without a null check.
   const voiceOverrides = watchedVoiceOverrides ?? {};
@@ -152,6 +172,7 @@ const {
 
       reset({
         agent_name: updated.data.agent_name,
+        persona_gender: updated.data.persona_gender,
         company_name: updated.data.company_name,
         company_info: updated.data.company_info,
         objective: updated.data.objective,
@@ -194,6 +215,37 @@ const {
             {errors.agent_name && (
               <FieldError>{errors.agent_name.message}</FieldError>
             )}
+          </Field>
+
+          <Field>
+            <FieldLabel htmlFor="persona_gender">
+              Persona gender
+            </FieldLabel>
+            <Select
+              value={watchedPersonaGender}
+              onValueChange={(value) => {
+                if (value === null) return;
+                form.setValue(
+                  "persona_gender",
+                  value as "female" | "male" | "neutral",
+                  { shouldDirty: true },
+                );
+              }}
+            >
+              <SelectTrigger id="persona_gender">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="female">Female</SelectItem>
+                <SelectItem value="male">Male</SelectItem>
+                <SelectItem value="neutral">Neutral</SelectItem>
+              </SelectContent>
+            </Select>
+            <FieldDescription>
+              Controls the grammatical gender of the agent&apos;s
+              first-person speech in Hindi, Tamil, and other Indic
+              languages. Should match the voice selected below.
+            </FieldDescription>
           </Field>
 
           <Field>
@@ -406,8 +458,28 @@ const {
                       form.setValue("voice_overrides", next, {
                         shouldDirty: true,
                       });
-                    }}
-                  >
+
+                      // Phase 7.10: derive persona gender from the
+                      // voice. The two should match: a male voice
+                      // with a female persona writes 'मैं समझती हूँ'
+                      // while sounding male, which reads as a bug
+                      // to the caller. The operator can override
+                      // the derived value afterwards.
+                      if (value === "default") {
+                        // Default voices vary by language and are
+                        // all female in our curated set.
+                        form.setValue("persona_gender", "female", {
+                          shouldDirty: true,
+                        });
+                      } else {
+                        const gender = findVoiceGender(value);
+                        if (gender) {
+                          form.setValue("persona_gender", gender, {
+                            shouldDirty: true,
+                          });
+                        }
+                      }
+                    }}                  >
                     <SelectTrigger id={`voice-${langCode}`}>
                       <SelectValue />
                     </SelectTrigger>

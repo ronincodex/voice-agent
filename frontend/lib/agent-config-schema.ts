@@ -30,6 +30,7 @@ export const AgentConfigSchema = z
       .string()
       .min(1, "Agent name is required")
       .max(64, "Agent name must be 64 characters or fewer"),
+    persona_gender: z.enum(["female", "male", "neutral"]),
     company_name: z
       .string()
       .min(1, "Company name is required")
