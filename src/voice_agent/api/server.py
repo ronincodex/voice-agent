@@ -82,9 +82,14 @@ app = FastAPI(title="Voice Agent Telephony API")
 # combined with allow_credentials=True is rejected by browsers
 # anyway, and a wildcard without credentials would let any site
 # call the API. The explicit origin is both safer and correct.
+# Parse the comma-separated list, stripping whitespace and dropping
+# empty entries. A trailing comma in .env will not produce an empty
+# string origin.
+_origins = [o.strip() for o in settings.frontend_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
