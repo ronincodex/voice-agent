@@ -88,6 +88,16 @@ class Settings(BaseSettings):
     # the CORSMiddleware in api/server.py
     frontend_origin: str = "http://localhost:3000"
 
+    # ====== Public base URL (Phase 7.7) ======
+    # The externally reachable URL of this backend, without a
+    # trailing slash. Used to derive the Vobiz callback URLs
+    # (answer_url, hangup_url, ring_url) when the caller does not
+    # provide them explicitly.
+    #
+    # In local development with ngrok, this is the ngrok HTTPS URL.
+    # In production on Render, this is the Render service URL.
+    public_base_url: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

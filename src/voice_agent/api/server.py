@@ -450,10 +450,25 @@ async def trigger_call(request: Request) -> dict[str, Any]:
     hangup_url = body.get("hangup_url")
     ring_url = body.get("ring_url")
 
+    # Phase 7.7: the frontend sends only {to, language}. The
+    # callback URLs are derived from the configured public base
+    # URL, so the ngrok or Render host lives in one place.
+    # Explicit URLs in the request body still win, keeping the
+    # existing curl-based workflow working unchanged.
+    if not answer_url and settings.public_base_url:
+        base = settings.public_base_url.rstrip("/")
+        answer_url = f"{base}/answer"
+        hangup_url = hangup_url or f"{base}/hangup"
+        ring_url = ring_url or f"{base}/ring"
+
     if not to_number or not answer_url:
         raise HTTPException(
             status_code=400,
-            detail="'to' and 'answer_url' are required",
+            detail=(
+                "'to' is required, and either 'answer_url' must be sent "
+                "in the request or PUBLIC_BASE_URL must be set on the "
+                "server"
+            ),
         )
 
     placeholder_markers = ("YOUR-NGROK", "your-ngrok", "example.com", "<")
