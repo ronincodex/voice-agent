@@ -1,0 +1,73 @@
+# Phase 8: Render Blueprint.
+#
+# This file tells Render how to build and run the backend. It is
+# optional, the same configuration can be entered through the
+# Render dashboard. The Blueprint route is faster and version-
+# controlled.
+#
+# Secrets are declared with `sync: false`, which tells Render to
+# prompt for the value during the first deploy rather than reading
+# it from this file. The values themselves never appear in the
+# repository.
+services:
+  - type: web
+    name: voice-agent-backend
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    # Vobiz webhooks and the frontend both hit this service.
+    # healthCheckPath tells Render to wait until /health returns
+    # 200 before routing traffic.
+    healthCheckPath: /health
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    # The $PORT environment variable is set by Render. uvicorn
+    # must bind to 0.0.0.0 and read the port from it.
+    startCommand: uvicorn voice_agent.api.server:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      # --- Secrets: set these in the Render dashboard ---
+      # sync: false means "prompt me, don't read from this file".
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: VOBIZ_AUTH_ID
+        sync: false
+      - key: VOBIZ_AUTH_TOKEN
+        sync: false
+      - key: VOBIZ_PHONE_NUMBER
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        value: voice-recordings
+      # --- Runtime configuration ---
+      - key: DEFAULT_LANGUAGE
+        value: hi-IN
+      - key: SARVAM_STT_MODE
+        value: codemix
+      - key: GROQ_LLM_MODEL
+        value: openai/gpt-oss-120b
+      - key: ENABLE_FALLBACK_SUMMARIZER
+        value: "true"
+      - key: BYPASS_CALLING_HOURS
+        value: "false"
+      # FRONTEND_ORIGINS and PUBLIC_BASE_URL are set after the
+      # first deploy, once we know the onrender.com URL and the
+      # final Vercel URL. They are left unset here to avoid
+      # hardcoding values that will be wrong.

@@ -1,0 +1,42 @@
+# Phase 8: Render deploy requirements.
+#
+# Generated from pyproject.toml's [project] dependencies. Kept in
+# sync manually because Render's default build command is
+# `pip install -r requirements.txt`, which is simpler and faster
+# than installing the package itself.
+#
+# To regenerate after a dependency change:
+#   pip freeze | grep -v "^-e" > requirements.txt
+# then remove the packages that are already transitive dependencies.
+
+# Voice pipeline
+pipecat-ai[sarvam,daily,websocket]>=1.10.0,<2.0.0
+pipecat-vobiz>=0.0.3,<0.1
+
+# LLM / TTS APIs
+groq>=0.15.0
+
+# Configuration
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# HTTP
+httpx>=0.28.0
+
+# API server
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.20
+
+# State and persistence
+upstash-redis>=1.1.0
+supabase>=2.10.0
+
+# Storage
+boto>=1.35.0
+
+# Observability
+loguru>=0.7.0
+structlog>=24.4.0
+tenacity>=9.0.0
