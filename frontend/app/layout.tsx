@@ -1,3 +1,4 @@
+import { Toaster } from "@/components/ui/sonner";
 import { NuqsAdapter } from "nuqs/adapters/next/app";
 import type { Metadata } from "next";
 import { Geist } from "next/font/google";
@@ -29,6 +30,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <main className="flex-1 p-6 lg:p-8">{children}</main>
           </div>
         </NuqsAdapter>
+        <Toaster />
       </body>   
 </html>
   );
