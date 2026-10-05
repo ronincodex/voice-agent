@@ -1,5 +1,9 @@
 "use client";
 
+import {
+    VOICE_OPTIONS,
+    getDefaultVoice,
+}   from "@/lib/voice-options";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -32,6 +36,16 @@ import {
 } from "@/lib/agent-config-schema";
 import { ApiError, BROWSER_HEADERS } from "@/lib/api";
 import type { AgentConfig } from "@/lib/types";
+
+/**
+ * Display names for the language codes. Kept at module scope so
+ * the object is not recreated on every render.
+ */
+const LANGUAGE_NAMES: Record<string, string> = {
+  "hi-IN": "Hindi",
+  "en-IN": "English (India)",
+  "ta-IN": "Tamil",
+};
 
 /**
  * Agent configuration form.
@@ -102,6 +116,15 @@ const {
     control: form.control,
     name: "supported_languages",
   });
+
+  const watchedVoiceOverrides = useWatch({
+    control: form.control,
+    name: "voice_overrides",
+  });
+
+  // Fall back to an empty object so the Voice Selection card
+  // can read [langCode] without a null check.
+  const voiceOverrides = watchedVoiceOverrides ?? {};
   
   async function onSubmit(values: AgentConfigFormValues) {
     setSaving(true);
@@ -344,6 +367,67 @@ const {
           </Field>
         </FieldGroup>
       </div>
+
+            {/* Voice Selection — one dropdown per supported language.
+          Reads watchedSupportedLanguages so the rows appear and
+          disappear as the operator checks and unchecks languages. */}
+      {watchedSupportedLanguages.length > 0 && (
+        <div className="rounded-lg border bg-card p-6">
+          <FieldGroup>
+            <Field>
+              <FieldLabel>Voice Selection</FieldLabel>
+              <FieldDescription>
+                Override the default voice for each supported language.
+                Leave as &quot;Default&quot; to use the system voice.
+              </FieldDescription>
+            </Field>
+
+            {watchedSupportedLanguages.map((langCode) => {
+              const languageLabel = LANGUAGE_NAMES[langCode] ?? langCode;
+              const currentOverride =
+                voiceOverrides[langCode]?.tts_voice ?? "default";
+              const defaultVoice = getDefaultVoice(langCode);
+
+              return (
+                <Field key={langCode}>
+                  <FieldLabel htmlFor={`voice-${langCode}`}>
+                    {languageLabel}
+                  </FieldLabel>
+                  <Select
+                    value={currentOverride}
+                    onValueChange={(value) => {
+                      if (value === null) return;
+                      const next = { ...voiceOverrides };
+                      if (value === "default") {
+                        delete next[langCode];
+                      } else {
+                        next[langCode] = { tts_voice: value };
+                      }
+                      form.setValue("voice_overrides", next, {
+                        shouldDirty: true,
+                      });
+                    }}
+                  >
+                    <SelectTrigger id={`voice-${langCode}`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">
+                        Default ({defaultVoice})
+                      </SelectItem>
+                      {VOICE_OPTIONS[langCode]?.map((voice) => (
+                        <SelectItem key={voice.id} value={voice.id}>
+                          {voice.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              );
+            })}
+          </FieldGroup>
+        </div>
+      )}
 
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={saving || !isDirty}>
