@@ -13,6 +13,27 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 /**
+ * Headers sent on every API request from the browser.
+ *
+ * ngrok-skip-browser-warning tells the ngrok free-tier proxy to
+ * pass the request through instead of serving its "you are about
+ * to visit..." interstitial. That interstitial has no CORS
+ * headers, so a browser fetch that receives it fails with "No
+ * Access-Control-Allow-Origin header is present". Server-side
+ * fetches never see the interstitial, which is why dashboard and
+ * calls pages have worked while the audio player has not.
+ *
+ * Harmless against a backend that is not behind ngrok: Render,
+ * for example, ignores unknown request headers. When the backend
+ * moves to Render in Phase 8, this header can stay — it does no
+ * harm — or be removed.
+ */
+export const BROWSER_HEADERS: HeadersInit = {
+  Accept: "application/json",
+  "ngrok-skip-browser-warning": "true",
+};
+
+/**
  * Error type thrown by fetchApi on any non-2xx response. Carries
  * the HTTP status and FastAPI's `detail` string so call sites can
  * distinguish "not found" from "network down" from "validation
@@ -40,7 +61,7 @@ export class ApiError extends Error {
 export async function fetchApi<T>(path: string): Promise<T> {
   const url = `${API_BASE_URL}${path}`;
   const res = await fetch(url, {
-    headers: { Accept: "application/json" },
+    headers: BROWSER_HEADERS,
     next: { revalidate: 30 },
   });
 
@@ -68,7 +89,7 @@ export async function fetchPaginated<T>(
 ): Promise<PaginatedResponse<T>> {
   const url = `${API_BASE_URL}${path}`;
   const res = await fetch(url, {
-    headers: { Accept: "application/json" },
+    headers: BROWSER_HEADERS,
     next: { revalidate: 30 },
   });
 

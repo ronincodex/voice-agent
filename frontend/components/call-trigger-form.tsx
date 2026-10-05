@@ -22,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ApiError } from "@/lib/api";
+import { ApiError, BROWSER_HEADERS } from "@/lib/api";
 
 interface LanguageEntry {
   code: string;
@@ -67,7 +67,7 @@ export function CallTriggerForm({
         `${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"}/call`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { ...BROWSER_HEADERS, "Content-Type": "application/json" },
           body: JSON.stringify({ to, language }),
         },
       );

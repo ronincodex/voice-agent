@@ -30,7 +30,7 @@ import {
   LANGUAGE_CODES,
   type AgentConfigFormValues,
 } from "@/lib/agent-config-schema";
-import { ApiError } from "@/lib/api";
+import { ApiError, BROWSER_HEADERS } from "@/lib/api";
 import type { AgentConfig } from "@/lib/types";
 
 /**
@@ -110,7 +110,7 @@ const {
         `${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"}/agents/config`,
         {
           method: "PUT",
-          headers: { "Content-Type": "application/json" },
+          headers: { ...BROWSER_HEADERS, "Content-Type": "application/json" },
           body: JSON.stringify(values),
         },
       );
